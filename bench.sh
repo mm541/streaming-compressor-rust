@@ -25,6 +25,9 @@ printf "%-8s-+-%-12s-+-%-12s-+-%-12s-+-%-10s-+-%-10s\n" \
 # Find time command (Termux has it in a different path)
 TIME_CMD=$(command -v time || echo "/usr/bin/time")
 
+# Calculate throughput (Total bytes / seconds)
+TOTAL_KB=$(du -s "$INPUT" | awk '{print $1}')
+
 for T in "${THREADS[@]}"; do
     # Run with time -v, but stream the output live to the screen in real-time
     # so the user doesn't think it's hung. We capture only the time output via a tmp file.
@@ -45,9 +48,6 @@ for T in "${THREADS[@]}"; do
     CPU_USAGE=$(grep "Percent of CPU this job got" "$TIME_OUT" | awk '{print $NF}')
     PEAK_RAM=$(grep "Maximum resident set size" "$TIME_OUT" | awk '{print $NF}')
     
-    # Calculate throughput (Total bytes / seconds)
-    # Total bytes from du -b or similar. Let's use du -s (KB)
-    TOTAL_KB=$(du -s "$INPUT" | awk '{print $1}')
     # Rough seconds conversion for throughput
     SEC=$(echo "$WALL_TIME" | awk -F: '{if (NF==3) print $1*3600+$2*60+$3; else print $1*60+$2}')
     THROUGHPUT=$(echo "$TOTAL_KB / 1024 / $SEC" | bc -l | xargs printf "%.1f MB/s")

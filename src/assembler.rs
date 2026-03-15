@@ -32,28 +32,36 @@ impl FragmentReader {
         let mut bytes_remaining_in_current_file = 0;
 
         if bytes_remaining_in_fragment > 0 {
-            // Find the entry that covers virtual_start
-            for (i, entry) in manifest.entries.iter().enumerate() {
-                if virtual_start >= entry.byte_offset && virtual_start < entry.byte_offset + entry.original_size {
-                    current_entry_idx = i;
-                    let file_path = root.join(&entry.relative_path);
-                    let file_offset = virtual_start - entry.byte_offset;
-                    bytes_remaining_in_current_file = entry.original_size - file_offset;
-                    
-                    match File::open(&file_path) {
-                        Ok(mut f) => {
-                            if let Err(e) = f.seek(SeekFrom::Start(file_offset)) {
-                                eprintln!("Warning: failed to seek in {} during compression: {}", file_path.display(), e);
-                            } else {
-                                current_file = Some(f);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("Warning: failed to open {} during compression (file deleted/locked?): {}", file_path.display(), e);
-                            // We leave current_file = None, which triggers zero-padding for its length
+            // Binary search to find the entry that covers virtual_start.
+            // entries are sorted by byte_offset (strictly monotonic).
+            let entry_idx = manifest.entries.binary_search_by(|e| {
+                if virtual_start < e.byte_offset {
+                    std::cmp::Ordering::Greater
+                } else if virtual_start >= e.byte_offset + e.original_size {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            });
+
+            if let Ok(i) = entry_idx {
+                current_entry_idx = i;
+                let entry = &manifest.entries[i];
+                let file_path = root.join(&entry.relative_path);
+                let file_offset = virtual_start - entry.byte_offset;
+                bytes_remaining_in_current_file = entry.original_size - file_offset;
+
+                match File::open(&file_path) {
+                    Ok(mut f) => {
+                        if let Err(e) = f.seek(SeekFrom::Start(file_offset)) {
+                            eprintln!("Warning: failed to seek in {} during compression: {}", file_path.display(), e);
+                        } else {
+                            current_file = Some(f);
                         }
                     }
-                    break;
+                    Err(e) => {
+                        eprintln!("Warning: failed to open {} during compression (file deleted/locked?): {}", file_path.display(), e);
+                    }
                 }
             }
         }
