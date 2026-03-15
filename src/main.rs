@@ -80,13 +80,16 @@ fn main() -> Result<()> {
                 let out = output_dir.clone();
                 let pb_clone = pb.clone();
                 consumer_handles.push(std::thread::spawn(move || -> Result<()> {
-                    let mut current_file: Option<std::fs::File> = None;
+                    let mut current_file: Option<std::io::BufWriter<std::fs::File>> = None;
 
                     for event in rx {
                         match event? {
                             compressor::publisher::CompressEvent::Start { fragment_idx } => {
                                 let path = out.join(format!("fragment_{:06}.zst", fragment_idx));
-                                current_file = Some(std::fs::File::create(&path)?);
+                                current_file = Some(std::io::BufWriter::with_capacity(
+                                    256 * 1024, 
+                                    std::fs::File::create(&path)?
+                                ));
                             }
                             compressor::publisher::CompressEvent::Chunk { data } => {
                                 if let Some(ref mut f) = current_file {
@@ -94,6 +97,9 @@ fn main() -> Result<()> {
                                 }
                             }
                             compressor::publisher::CompressEvent::Complete { .. } => {
+                                if let Some(ref mut f) = current_file {
+                                    std::io::Write::flush(f)?;
+                                }
                                 current_file = None;
                                 pb_clone.inc(1);
                             }

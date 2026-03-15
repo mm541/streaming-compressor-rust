@@ -41,7 +41,7 @@ for T in "${THREADS[@]}"; do
     # Run compression with progress bar
     # We use -v to get Peak RAM and Wall Time from the 'time' command
     TIME_OUT=$(mktemp)
-    $TIME_CMD -v -o "$TIME_OUT" $BINARY compress "$INPUT" "$TMP_ARCHIVE" --fragment-size $FRAG_SIZE --threads $T
+    $TIME_CMD -v -o "$TIME_OUT" $BINARY compress "$INPUT" "$TMP_ARCHIVE" --fragment-size $FRAG_SIZE --threads $T 2>/dev/null
     
     # Parse results from the 'time' output
     WALL_TIME=$(grep "Elapsed (wall clock) time" "$TIME_OUT" | awk '{print $NF}')
@@ -63,14 +63,10 @@ for T in "${THREADS[@]}"; do
     # Print and Log row
     printf "%-12s | %-12s | %-12s | %-10s | %-10s\n" "$WALL_TIME" "$CPU_USAGE" "$((PEAK_RAM/1024)) MB" "$THROUGHPUT" "$SPEEDUP" | tee -a benchmark_results.txt
     
-    # Run a quick verify decompression (optional but nice for the user to see progress)
-    # Uncomment if you want to benchmark decompression too
-    # echo "  [Verifying decompression...]"
-    # $BINARY decompress "$TMP_ARCHIVE" "/tmp/verify_$$"
-    
-    # Cleanup
+    # Cleanup immediately + flush filesystem buffers before next iteration
     rm -rf "$TMP_ARCHIVE"
     rm "$TIME_OUT"
+    sync
 done
 
 echo "" | tee -a benchmark_results.txt
