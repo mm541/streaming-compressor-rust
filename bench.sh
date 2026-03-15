@@ -41,7 +41,7 @@ for T in "${THREADS[@]}"; do
     # Run compression with progress bar
     # We use -v to get Peak RAM and Wall Time from the 'time' command
     TIME_OUT=$(mktemp)
-    $TIME_CMD -v -o "$TIME_OUT" $BINARY compress "$INPUT" "$TMP_ARCHIVE" --fragment-size $FRAG_SIZE --threads $T 2>/dev/null
+    $TIME_CMD -v -o "$TIME_OUT" $BINARY compress "$INPUT" "$TMP_ARCHIVE" --fragment-size $FRAG_SIZE --threads $T 2> >(grep -v "^Warning:" >&2)
     
     # Parse results from the 'time' output
     WALL_TIME=$(grep "Elapsed (wall clock) time" "$TIME_OUT" | awk '{print $NF}')
