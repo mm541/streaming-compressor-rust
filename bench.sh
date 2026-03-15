@@ -5,13 +5,13 @@
 set -e
 
 INPUT="/home/azam/personal"
-FRAG_SIZE=2147483648  # 2 GB
+FRAG_SIZE=16777216  # 2 GB
 BINARY="./target/release/compressor"
 THREADS=(1 5 10 15 20)
 
 echo "═══════════════════════════════════════════════════════════════════" | tee benchmark_results.txt
 echo " COMPREHENSIVE BENCHMARK — $(du -sh $INPUT 2>/dev/null | cut -f1) real data" | tee -a benchmark_results.txt
-echo " Fragment size: 2 GB" | tee -a benchmark_results.txt
+echo " Fragment size: 16 MB" | tee -a benchmark_results.txt
 echo " Thread counts: ${THREADS[*]}" | tee -a benchmark_results.txt
 echo "═══════════════════════════════════════════════════════════════════" | tee -a benchmark_results.txt
 echo "" | tee -a benchmark_results.txt
@@ -26,51 +26,51 @@ printf "%-8s-+-%-12s-+-%-12s-+-%-12s-+-%-10s-+-%-10s\n" \
 TIME_CMD=$(command -v time || echo "/usr/bin/time")
 
 for T in "${THREADS[@]}"; do
-    OUTDIR=$(mktemp -d)
-    
     # Run with time -v, but stream the output live to the screen in real-time
     # so the user doesn't think it's hung. We capture only the time output via a tmp file.
+    # Cap threads to number of fragments if needed
+    # (Optional optimization if frag_size is huge)
+    
+    TMP_ARCHIVE=$(mktemp -d)
+    
+    printf "%-8s | " "$T" | tee -a benchmark_results.txt
+    
+    # Run compression with progress bar
+    # We use -v to get Peak RAM and Wall Time from the 'time' command
     TIME_OUT=$(mktemp)
+    $TIME_CMD -v -o "$TIME_OUT" $BINARY compress "$INPUT" "$TMP_ARCHIVE" --fragment-size $FRAG_SIZE --threads $T
     
-    $TIME_CMD -v -o "$TIME_OUT" $BINARY compress "$INPUT" "$OUTDIR" \
-        --fragment-size $FRAG_SIZE \
-        --threads $T
+    # Parse results from the 'time' output
+    WALL_TIME=$(grep "Elapsed (wall clock) time" "$TIME_OUT" | awk '{print $NF}')
+    CPU_USAGE=$(grep "Percent of CPU this job got" "$TIME_OUT" | awk '{print $NF}')
+    PEAK_RAM=$(grep "Maximum resident set size" "$TIME_OUT" | awk '{print $NF}')
     
-    RESULT=$(cat "$TIME_OUT")
+    # Calculate throughput (Total bytes / seconds)
+    # Total bytes from du -b or similar. Let's use du -s (KB)
+    TOTAL_KB=$(du -s "$INPUT" | awk '{print $1}')
+    # Rough seconds conversion for throughput
+    SEC=$(echo "$WALL_TIME" | awk -F: '{if (NF==3) print $1*3600+$2*60+$3; else print $1*60+$2}')
+    THROUGHPUT=$(echo "$TOTAL_KB / 1024 / $SEC" | bc -l | xargs printf "%.1f MB/s")
     
-    # Extract metrics
-    WALL=$(echo "$RESULT" | /usr/bin/grep "Elapsed (wall clock)" | awk '{print $NF}')
-    CPU_PCT=$(echo "$RESULT" | /usr/bin/grep "Percent of CPU" | awk '{print $NF}')
-    RSS_KB=$(echo "$RESULT" | /usr/bin/grep "Maximum resident" | awk '{print $NF}')
-    RSS_MB=$(( RSS_KB / 1024 ))
-    
-    # Parse wall time to seconds for throughput calculation
-    # Format is either m:ss.ss or h:mm:ss
-    if echo "$WALL" | /usr/bin/grep -q ":.*:"; then
-        # h:mm:ss format
-        SECS=$(echo "$WALL" | awk -F: '{print $1*3600 + $2*60 + $3}')
+    # Speedup (relative to first run)
+    if [ "$T" -eq "${THREADS[0]}" ]; then
+        T1_SEC=$SEC
+        SPEEDUP="1.0x"
     else
-        # m:ss.ss format
-        SECS=$(echo "$WALL" | awk -F: '{print $1*60 + $2}')
+        SPEEDUP=$(echo "$T1_SEC / $SEC" | bc -l | xargs printf "%.2fx")
     fi
     
-    # Calculate throughput (40 GB / seconds)
-    THROUGHPUT=$(echo "scale=1; 40 / $SECS * 1024" | bc 2>/dev/null || echo "N/A")
+    # Print and Log row
+    printf "%-12s | %-12s | %-12s | %-10s | %-10s\n" "$WALL_TIME" "$CPU_USAGE" "$((PEAK_RAM/1024)) MB" "$THROUGHPUT" "$SPEEDUP" | tee -a benchmark_results.txt
     
-    # Calculate speedup vs 1 thread
-    if [ "$T" = "1" ]; then
-        BASELINE_TIME="$SECS"
-        SPEEDUP="1.00x"
-    else
-        SPEEDUP=$(echo "scale=2; $BASELINE_TIME / $SECS" | bc 2>/dev/null || echo "N/A")
-        SPEEDUP="${SPEEDUP}x"
-    fi
-    
-    printf "%-8s | %-12s | %-12s | %-12s | %-10s | %-10s\n" \
-        "$T" "$WALL" "${CPU_PCT}%" "${RSS_MB} MB" "${THROUGHPUT} MB/s" "$SPEEDUP" | tee -a benchmark_results.txt
+    # Run a quick verify decompression (optional but nice for the user to see progress)
+    # Uncomment if you want to benchmark decompression too
+    # echo "  [Verifying decompression...]"
+    # $BINARY decompress "$TMP_ARCHIVE" "/tmp/verify_$$"
     
     # Cleanup
-    rm -rf "$OUTDIR" "$TIME_OUT"
+    rm -rf "$TMP_ARCHIVE"
+    rm "$TIME_OUT"
 done
 
 echo "" | tee -a benchmark_results.txt

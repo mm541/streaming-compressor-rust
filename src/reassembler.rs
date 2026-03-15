@@ -34,7 +34,8 @@ impl<R: Read> Read for HashingReader<R> {
 
 /// Reads fragments sequentially, decompresses them natively via streams, 
 /// and reconstructs original files keeping absolute minimal memory bounds.
-pub fn extract_archive(archive_dir: &Path, output_dir: &Path, manifest: &Manifest) -> Result<()> {
+pub fn extract_archive<F>(archive_dir: &Path, output_dir: &Path, manifest: &Manifest, on_fragment_complete: F) -> Result<()> 
+where F: Fn(usize) {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create extract directory: {}", output_dir.display()))?;
 
@@ -120,6 +121,8 @@ pub fn extract_archive(archive_dir: &Path, output_dir: &Path, manifest: &Manifes
             "Checksum mismatch for fragment {}; archive may be corrupted",
             frag_idx
         );
+
+        on_fragment_complete(frag_idx);
     }
 
     Ok(())
@@ -187,7 +190,7 @@ mod tests {
         let manifest_content = fs::read_to_string(archive_dir.path().join("manifest.json")).unwrap();
         let saved_manifest: Manifest = serde_json::from_str(&manifest_content).unwrap();
         
-        extract_archive(archive_dir.path(), output_dir.path(), &saved_manifest).unwrap();
+        extract_archive(archive_dir.path(), output_dir.path(), &saved_manifest, |_| {}).unwrap();
 
         assert_eq!(fs::read_to_string(output_dir.path().join("f1.txt")).unwrap(), "first file data");
         assert_eq!(fs::read_to_string(output_dir.path().join("f2.txt")).unwrap(), "second somewhat longer file");

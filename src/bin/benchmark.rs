@@ -120,7 +120,7 @@ fn bench_decompress(archive_dir: &std::path::Path, output_dir: &std::path::Path)
     let total_bytes = manifest.total_original_size;
 
     let start = Instant::now();
-    extract_archive(archive_dir, output_dir, &manifest).unwrap();
+    extract_archive(archive_dir, output_dir, &manifest, |_| {}).unwrap();
     let elapsed = start.elapsed();
 
     println!("  Decompression: {:.2?} | {:.1} MB/s",
