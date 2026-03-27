@@ -1,14 +1,25 @@
 //! Manifest module — responsible for building the archive blueprint
 //! before any compression happens.
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod walker;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
-use std::path::PathBuf;
+// Removed PathBuf to avoid OS-specific types in the model
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(not(target_arch = "wasm32"))]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+/// Supported compression algorithms
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum CompressionAlgo {
+    Zstd,
+    Lz4,
+}
 
 /// The top-level manifest describing an entire archive.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -25,16 +36,24 @@ pub struct Manifest {
     /// Configured fragment size in bytes.
     pub fragment_size: u64,
 
+    /// Compression algorithm used for fragments.
+    pub algo: CompressionAlgo,
+
     /// Whether the input was a directory (true) or a single file (false).
     pub is_directory: bool,
 
-    /// All file entries in byte-stream order.
-    /// Directory structure is implicit from file paths.
-    pub entries: Vec<Entry>,
+    /// All stream entries in byte-stream order.
+    pub entries: Vec<StreamEntry>,
 
     /// Ordered list of compressed fragments representing the data in the archive.
     #[serde(default)]
     pub fragments: Vec<FragmentMeta>,
+
+    /// O(1) fragment to entry lookup.
+    /// `fragment_start_indices[f]` gives the index of the first `StreamEntry`
+    /// containing data for fragment `f`.
+    #[serde(default)]
+    pub fragment_start_indices: Vec<usize>,
 }
 
 /// Metadata about a single compressed chunk of the archive.
@@ -51,13 +70,13 @@ pub struct FragmentMeta {
     pub checksum: String,
 }
 
-/// A single file entry in the archive.
+/// A generic logical stream entry (e.g., a file) in the archive.
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Entry {
-    /// Path relative to the input root directory.
-    pub relative_path: PathBuf,
+pub struct StreamEntry {
+    /// Generic identifier (e.g., relative path converted to standard string).
+    pub identifier: String,
 
-    /// Original file size in bytes.
+    /// Original stream size in bytes.
     pub original_size: u64,
 
     /// Unix permissions (mode bits).
@@ -66,33 +85,43 @@ pub struct Entry {
     /// Last modified time as unix timestamp.
     pub modified_at: u64,
 
-    /// Byte offset where this file's data starts in the contiguous byte stream.
+    /// Byte offset where this entry's data starts in the contiguous byte stream.
     pub byte_offset: u64,
 
-    /// Hex-encoded hash of the file contents for integrity verification.
-    /// Populated after reading file data, not during the initial directory walk.
+    /// Hex-encoded hash of the stream contents for integrity verification.
     pub checksum: Option<String>,
 
-    /// If this entry is a symlink, the path it points to. None for regular files.
-    pub symlink_target: Option<PathBuf>,
+    /// If this entry is a symlink, the target identifier. None for regular streams.
+    pub symlink_target: Option<String>,
 }
 
-/// Assign sequential byte offsets to each entry.
-///
-/// Each file's `byte_offset` is the cumulative sum of all preceding files' sizes.
-/// Entries must already be in their final order (sorted by path).
-pub fn compute_byte_offsets(entries: &mut [Entry]) {
+/// Assign sequential byte offsets to each entry, and compute fragment start indices.
+pub fn compute_offsets_and_indices(entries: &mut [StreamEntry], fragment_size: u64) -> Vec<usize> {
     let mut offset: u64 = 0;
-    for entry in entries.iter_mut() {
+    let mut fragment_start_indices = Vec::new();
+
+    for (i, entry) in entries.iter_mut().enumerate() {
         entry.byte_offset = offset;
+        
+        if entry.original_size > 0 {
+            let end_frag = ((offset + entry.original_size - 1) / fragment_size) as usize;
+
+            while fragment_start_indices.len() <= end_frag {
+                fragment_start_indices.push(i);
+            }
+        } else if fragment_start_indices.is_empty() {
+            fragment_start_indices.push(i);
+        }
+
         offset += entry.original_size;
     }
+
+    fragment_start_indices
 }
 
-/// Create an `Entry` from a file's metadata and relative path.
-///
-/// Shared helper used by both the directory walker and single-file handling.
-pub fn entry_from_metadata(relative_path: PathBuf, metadata: &std::fs::Metadata) -> Entry {
+/// Create a `StreamEntry` from a file's metadata and an identifier.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn entry_from_metadata(identifier: String, metadata: &std::fs::Metadata) -> StreamEntry {
     let modified_at = metadata
         .modified()
         .unwrap_or(UNIX_EPOCH)
@@ -109,8 +138,8 @@ pub fn entry_from_metadata(relative_path: PathBuf, metadata: &std::fs::Metadata)
     #[cfg(not(unix))]
     let permissions = 0o644;
 
-    Entry {
-        relative_path,
+    StreamEntry {
+        identifier,
         original_size: metadata.len(),
         permissions,
         modified_at,
@@ -127,14 +156,7 @@ pub const MIN_FRAGMENT_SIZE: u64 = 1024 * 1024;
 pub const MAX_FRAGMENT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 /// Build a complete manifest from a directory or single file path.
-///
-/// Steps:
-/// 1. Validate fragment size
-/// 2. Detect if root is a file or directory
-/// 3. Collect file entries (walk directory, or create single entry)
-/// 4. Assign sequential byte offsets
-/// 5. Compute total size
-/// 6. Return the manifest
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_manifest(root: &Path, fragment_size: u64) -> Result<Manifest> {
     anyhow::ensure!(
         fragment_size >= MIN_FRAGMENT_SIZE && fragment_size <= MAX_FRAGMENT_SIZE,
@@ -154,19 +176,20 @@ pub fn build_manifest(root: &Path, fragment_size: u64) -> Result<Manifest> {
         walker::walk_directory(&root)
             .with_context(|| format!("failed to walk directory: {}", root.display()))?
     } else {
-        // Single file — create one entry directly
         let metadata = root
             .metadata()
             .with_context(|| format!("failed to read metadata: {}", root.display()))?;
 
         let file_name = root
             .file_name()
-            .with_context(|| format!("path has no filename: {}", root.display()))?;
+            .with_context(|| format!("path has no filename: {}", root.display()))?
+            .to_string_lossy()
+            .into_owned();
 
-        vec![entry_from_metadata(PathBuf::from(file_name), &metadata)]
+        vec![entry_from_metadata(file_name, &metadata)]
     };
 
-    compute_byte_offsets(&mut entries);
+    let fragment_start_indices = compute_offsets_and_indices(&mut entries, fragment_size);
 
     let total_original_size = entries.iter().map(|e| e.original_size).sum();
 
@@ -180,13 +203,16 @@ pub fn build_manifest(root: &Path, fragment_size: u64) -> Result<Manifest> {
         created_at,
         total_original_size,
         fragment_size,
+        algo: CompressionAlgo::Zstd, // Defaulting to native target choice
         is_directory,
         entries,
         fragments: Vec::new(),
+        fragment_start_indices,
     })
 }
 
 /// Serialize a manifest to a JSON file at the given path.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn save_manifest(manifest: &Manifest, path: &Path) -> Result<()> {
     let json = serde_json::to_string_pretty(manifest)
         .context("failed to serialize manifest")?;
@@ -196,6 +222,7 @@ pub fn save_manifest(manifest: &Manifest, path: &Path) -> Result<()> {
 }
 
 /// Load a manifest from a JSON file at the given path.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_manifest(path: &Path) -> Result<Manifest> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read manifest from {}", path.display()))?;

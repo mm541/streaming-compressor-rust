@@ -1,8 +1,8 @@
 use std::time::Instant;
 
-use compressor::manifest::build_manifest;
-use compressor::publisher::{start_pipeline, CompressEvent};
-use compressor::reassembler::extract_archive;
+use core::manifest::build_manifest;
+use cli::publisher::compress_archive;
+use cli::reassembler::extract_archive;
 
 fn generate_test_data(dir: &std::path::Path, total_mb: usize) {
     // Create a mix of file sizes to simulate real workloads
@@ -59,50 +59,36 @@ fn bench_compress(input_dir: &std::path::Path, archive_dir: &std::path::Path, co
 
     let start = Instant::now();
 
-    let pipeline = start_pipeline(
-        input_dir.to_path_buf(),
-        manifest,
-        concurrency,
-        128,
-    );
-
-    let n_workers = pipeline.receivers.len();
-
-    // Drain each receiver, writing to disk
-    let mut consumer_handles = Vec::new();
-    for rx in pipeline.receivers {
-        let out = archive_dir.to_path_buf();
-        consumer_handles.push(std::thread::spawn(move || {
-            let mut current_file: Option<std::fs::File> = None;
-            for event in rx {
-                match event.unwrap() {
-                    CompressEvent::Start { fragment_idx } => {
-                        let path = out.join(format!("fragment_{:06}.zst", fragment_idx));
-                        current_file = Some(std::fs::File::create(&path).unwrap());
-                    }
-                    CompressEvent::Chunk { data } => {
-                        std::io::Write::write_all(current_file.as_mut().unwrap(), &data).unwrap();
-                    }
-                    CompressEvent::Complete { .. } => {
-                        current_file = None;
-                    }
-                }
-            }
-        }));
+    if let Some(n) = concurrency {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap();
+        pool.install(|| {
+            let manifest = compress_archive(
+                input_dir.to_path_buf(),
+                archive_dir.to_path_buf(),
+                manifest,
+            ).unwrap();
+            let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
+            std::fs::write(archive_dir.join("manifest.json"), manifest_json).unwrap();
+        });
+    } else {
+        let manifest = compress_archive(
+            input_dir.to_path_buf(),
+            archive_dir.to_path_buf(),
+            manifest,
+        ).unwrap();
+        let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
+        std::fs::write(archive_dir.join("manifest.json"), manifest_json).unwrap();
     }
-
-    for h in consumer_handles {
-        h.join().unwrap();
-    }
-
-    let manifest = pipeline.handle.join().unwrap().unwrap();
-    let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
-    std::fs::write(archive_dir.join("manifest.json"), manifest_json).unwrap();
 
     let elapsed = start.elapsed();
 
+    let manifest_content = std::fs::read_to_string(archive_dir.join("manifest.json")).unwrap();
+    let manifest: core::manifest::Manifest = serde_json::from_str(&manifest_content).unwrap();
+
     let compressed_size: u64 = manifest.fragments.iter().map(|f| f.compressed_size).sum();
     let ratio = (compressed_size as f64 / total_bytes as f64) * 100.0;
+
+    let n_workers = concurrency.unwrap_or_else(|| rayon::current_num_threads());
 
     println!("  Compression: {:.2?} | {} workers | {:.1} MB/s | ratio: {:.1}%",
         elapsed,
@@ -116,7 +102,7 @@ fn bench_compress(input_dir: &std::path::Path, archive_dir: &std::path::Path, co
 
 fn bench_decompress(archive_dir: &std::path::Path, output_dir: &std::path::Path) -> std::time::Duration {
     let manifest_content = std::fs::read_to_string(archive_dir.join("manifest.json")).unwrap();
-    let manifest: compressor::manifest::Manifest = serde_json::from_str(&manifest_content).unwrap();
+    let manifest: core::manifest::Manifest = serde_json::from_str(&manifest_content).unwrap();
     let total_bytes = manifest.total_original_size;
 
     let start = Instant::now();

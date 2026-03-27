@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use jwalk::WalkDir;
 
-use super::{Entry, entry_from_metadata};
+use super::{StreamEntry, entry_from_metadata};
 
 /// Walk a directory tree and collect metadata for all regular files.
 ///
@@ -19,7 +19,7 @@ use super::{Entry, entry_from_metadata};
 ///
 /// `byte_offset` is set to 0 — call `compute_byte_offsets` afterwards.
 /// `checksum` is set to None — populated later when file data is read.
-pub fn walk_directory(root: &PathBuf) -> Result<Vec<Entry>> {
+pub fn walk_directory(root: &PathBuf) -> Result<Vec<StreamEntry>> {
     let mut entries = Vec::new();
     let mut skipped = 0usize;
 
@@ -36,9 +36,8 @@ pub fn walk_directory(root: &PathBuf) -> Result<Vec<Entry>> {
 
         let path = dir_entry.path();
 
-        // Compute relative path early - needed for both symlinks and regular files
         let relative_path = match path.strip_prefix(&root) {
-            Ok(rel) => rel.to_path_buf(),
+            Ok(rel) => rel.to_string_lossy().into_owned(),
             Err(_) => {
                 eprintln!("  [WARN] skipping (cannot strip prefix): {}", path.display());
                 skipped += 1;
@@ -57,9 +56,11 @@ pub fn walk_directory(root: &PathBuf) -> Result<Vec<Entry>> {
         };
 
         if file_type.is_symlink() {
-            let target = std::fs::read_link(&path).ok();
-            entries.push(Entry {
-                relative_path,
+            let target = std::fs::read_link(&path)
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned());
+            entries.push(StreamEntry {
+                identifier: relative_path,
                 original_size: 0,
                 permissions: 0o777,
                 modified_at: 0,
@@ -100,7 +101,7 @@ pub fn walk_directory(root: &PathBuf) -> Result<Vec<Entry>> {
     }
 
     // Sort by relative path for deterministic ordering
-    entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    entries.sort_by(|a, b| a.identifier.cmp(&b.identifier));
 
     Ok(entries)
 }
@@ -111,7 +112,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::walk_directory;
-    use crate::manifest::{build_manifest, compute_byte_offsets};
+    use crate::manifest::{build_manifest, compute_offsets_and_indices};
 
     /// Create a temp directory with this structure:
     /// tmp/
@@ -147,7 +148,7 @@ mod tests {
 
         let paths: Vec<_> = entries
             .iter()
-            .map(|e| e.relative_path.to_string_lossy().to_string())
+            .map(|e| e.identifier.clone())
             .collect();
 
         // Should be sorted alphabetically
@@ -165,11 +166,11 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_byte_offsets() {
+    fn test_compute_offsets_and_indices() {
         let dir = create_test_dir();
         let mut entries = walk_directory(&dir.path().to_path_buf()).unwrap();
 
-        compute_byte_offsets(&mut entries);
+        compute_offsets_and_indices(&mut entries, 1024);
 
         assert_eq!(entries[0].byte_offset, 0);   // empty.txt (size 0)
         assert_eq!(entries[1].byte_offset, 0);   // hello.txt starts at 0 (empty.txt is 0 bytes)
@@ -206,7 +207,7 @@ mod tests {
         #[cfg(unix)]
         {
             // Find the symlink entry
-            let link = entries.iter().find(|e| e.relative_path.to_str() == Some("link.txt"));
+            let link = entries.iter().find(|e| e.identifier == "link.txt");
             assert!(link.is_some(), "symlink should be recorded");
             let link = link.unwrap();
             assert_eq!(link.original_size, 0, "symlink should have 0 size");

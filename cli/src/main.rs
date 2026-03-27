@@ -3,7 +3,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use compressor::manifest::{build_manifest, save_manifest, load_manifest};
+use core::manifest::{build_manifest, save_manifest, load_manifest};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -58,68 +58,25 @@ fn main() -> Result<()> {
 
             println!("Compressing and streaming archive to {}...", output_dir.display());
 
-            // Start N worker threads, each with its own backpressure-isolated channel
-            let pipeline = compressor::publisher::start_pipeline(
-                input.clone(),
-                manifest,
-                threads,       // None = auto-detect from CPU cores
-                64,            // bounded channel capacity per worker
-            );
-
-            let n = pipeline.receivers.len();
-            println!("Pipeline started with {} worker threads", n);
-
             let pb = ProgressBar::new(num_fragments as u64);
             pb.set_style(ProgressStyle::default_bar()
                 .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")?
                 .progress_chars("#>-"));
 
-            // Spawn one consumer thread per receiver — each writes fragment files to disk independently
-            let mut consumer_handles = Vec::with_capacity(n);
-            for rx in pipeline.receivers {
-                let out = output_dir.clone();
-                let pb_clone = pb.clone();
-                consumer_handles.push(std::thread::spawn(move || -> Result<()> {
-                    let mut current_file: Option<std::io::BufWriter<std::fs::File>> = None;
-
-                    for event in rx {
-                        match event? {
-                            compressor::publisher::CompressEvent::Start { fragment_idx } => {
-                                let path = out.join(format!("fragment_{:06}.zst", fragment_idx));
-                                current_file = Some(std::io::BufWriter::with_capacity(
-                                    256 * 1024, 
-                                    std::fs::File::create(&path)?
-                                ));
-                            }
-                            compressor::publisher::CompressEvent::Chunk { data } => {
-                                if let Some(ref mut f) = current_file {
-                                    std::io::Write::write_all(f, &data)?;
-                                }
-                            }
-                            compressor::publisher::CompressEvent::Complete { .. } => {
-                                if let Some(ref mut f) = current_file {
-                                    std::io::Write::flush(f)?;
-                                }
-                                current_file = None;
-                                pb_clone.inc(1);
-                            }
-                        }
-                    }
-                    Ok(())
-                }));
+            if let Some(n) = threads {
+                rayon::ThreadPoolBuilder::new().num_threads(n).build_global().unwrap_or_default();
             }
 
-            // Wait for all consumers to finish writing
-            for h in consumer_handles {
-                h.join().map_err(|_| anyhow::anyhow!("consumer thread panicked"))??;
-            }
-
-            // Join the coordinator and get the final manifest
-            let manifest = pipeline.handle.join().map_err(|_| anyhow::anyhow!("pipeline panicked"))??;
+            // Rayon processes the fragments, blocking until fully complete
+            let final_manifest = cli::publisher::compress_archive(
+                input.clone(),
+                output_dir.clone(),
+                manifest
+            )?;
 
             pb.finish_with_message("Compression complete");
 
-            save_manifest(&manifest, &output_dir.join("manifest.json"))?;
+            save_manifest(&final_manifest, &output_dir.join("manifest.json"))?;
             println!("Manifest written. Compression pipeline complete.");
         }
         Commands::Decompress { archive_dir, output_dir } => {
@@ -133,7 +90,7 @@ fn main() -> Result<()> {
                 .template("{spinner:.green} [{elapsed_precise}] [{bar:40.magenta/blue}] {pos}/{len} ({eta})")?
                 .progress_chars("#>-"));
 
-            compressor::reassembler::extract_archive(&archive_dir, &output_dir, &manifest, |_| {
+            cli::reassembler::extract_archive(&archive_dir, &output_dir, &manifest, |_| {
                 pb.inc(1);
             })?;
             

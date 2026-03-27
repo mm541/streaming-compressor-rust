@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use crate::manifest::Manifest;
+use core::manifest::Manifest;
 
 /// Computes a Blake3 checksum while reading from an inner reader.
 pub struct HashingReader<R: Read> {
@@ -67,7 +67,7 @@ where F: Fn(usize) {
             }
 
             let entry = &manifest.entries[current_entry_idx];
-            let file_path = output_dir.join(&entry.relative_path);
+            let file_path = output_dir.join(&entry.identifier);
 
             if entry.original_size == 0 {
                 if let Some(parent) = file_path.parent() {
@@ -131,8 +131,8 @@ where F: Fn(usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::build_manifest;
-    use crate::publisher::{start_pipeline, CompressEvent};
+    use core::manifest::build_manifest;
+    use crate::publisher::compress_archive;
     use tempfile::TempDir;
 
     #[test]
@@ -150,39 +150,13 @@ mod tests {
         let mut manifest = build_manifest(input_dir.path(), 1024 * 1024).unwrap(); 
         manifest.fragment_size = 16;
 
-        // 2 workers, channel bound of 10
-        let pipeline = start_pipeline(input_dir.path().to_path_buf(), manifest, Some(2), 10);
+        // Compress using the new Rayon-based archive function
+        let manifest = compress_archive(
+            input_dir.path().to_path_buf(),
+            archive_dir.path().to_path_buf(),
+            manifest,
+        ).unwrap();
 
-        // Drain each receiver in its own consumer thread, writing fragments to archive_dir
-        let mut consumer_handles = Vec::new();
-        for rx in pipeline.receivers {
-            let archive = archive_dir.path().to_path_buf();
-            consumer_handles.push(std::thread::spawn(move || {
-                let mut current_file: Option<std::fs::File> = None;
-                for event in rx {
-                    match event.unwrap() {
-                        CompressEvent::Start { fragment_idx } => {
-                            let path = archive.join(format!("fragment_{:06}.zst", fragment_idx));
-                            current_file = Some(std::fs::File::create(&path).unwrap());
-                        }
-                        CompressEvent::Chunk { data } => {
-                            std::io::Write::write_all(current_file.as_mut().unwrap(), &data).unwrap();
-                        }
-                        CompressEvent::Complete { .. } => {
-                            current_file = None;
-                        }
-                    }
-                }
-            }));
-        }
-
-        // Wait for consumers
-        for h in consumer_handles {
-            h.join().unwrap();
-        }
-
-        // Get the final manifest from the coordinator
-        let manifest = pipeline.handle.join().unwrap().unwrap();
         let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
         fs::write(archive_dir.path().join("manifest.json"), manifest_json).unwrap();
 
