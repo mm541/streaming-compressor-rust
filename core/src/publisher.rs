@@ -5,6 +5,11 @@ use std::sync::mpsc::Sender;
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 
+thread_local! {
+    /// 128 KB zero-allocation thread pool globally reserved specifically for uncompressed passthrough bypassing.
+    static PASSTHROUGH_BUF: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(vec![0u8; 128 * 1024]);
+}
+
 use crate::stream::{ReadSeek, FragmentReader, StreamProvider};
 use crate::compressor::CompressionEngine;
 use crate::detection::is_compressible;
@@ -136,7 +141,28 @@ where
     let manifest_arc = Arc::new(manifest.clone());
     let skip_map = Arc::new(skip_map.unwrap_or_default());
 
-    let fragment_indices: Vec<usize> = (0..num_fragments).collect();
+    // Optimization: Asymmetric Thread Stragglers
+    // Pre-calculate complexity (number of file boundaries overlapping each fragment)
+    let mut fragment_indices: Vec<usize> = (0..num_fragments).collect();
+    let mut fragment_complexities = vec![0_usize; num_fragments];
+    
+    for idx in 0..num_fragments {
+        let frag_start = (idx as u64) * manifest_arc.fragment_size;
+        let frag_end = frag_start + manifest_arc.fragment_size;
+        let start_idx = manifest_arc.fragment_start_indices.get(idx).copied().unwrap_or(0);
+        
+        let mut count = 0;
+        for entry in &manifest_arc.entries[start_idx..] {
+            if entry.byte_offset >= frag_end { break; }
+            if entry.byte_offset + entry.original_size <= frag_start { continue; }
+            count += 1;
+        }
+        fragment_complexities[idx] = count;
+    }
+    
+    // Sort descending so Rayon pulls the fragments with the most file metadata/seeking bounds FIRST.
+    // This perfectly masks the long-tail blocking delay of heavily fragmented chunks.
+    fragment_indices.sort_by_cached_key(|&idx| std::cmp::Reverse(fragment_complexities[idx]));
 
     let metas: Result<Vec<(usize, FragmentMeta)>> = fragment_indices
         .into_par_iter()
@@ -190,9 +216,20 @@ where
                 engine.compress(&mut tracking_reader, &mut tracking_writer)
                     .map_err(|e| anyhow::anyhow!("Compression failed for fragment {}: {}", idx, e))?;
             } else {
-                // Passthrough: copy raw bytes without compression
-                std::io::copy(&mut tracking_reader, &mut tracking_writer)
-                    .map_err(|e| anyhow::anyhow!("Passthrough copy failed for fragment {}: {}", idx, e))?;
+                // Optimization: Passthrough Loop Buffers
+                // Inject the massive 128KB thread-local slice natively to override std::io::copy's tiny 8KB buffer allocations.
+                PASSTHROUGH_BUF.with(|buf_cell| -> Result<()> {
+                    let mut buf = buf_cell.borrow_mut();
+                    loop {
+                        let n = tracking_reader.read(&mut buf)
+                            .map_err(|e| anyhow::anyhow!("Passthrough read failed: {}", e))?;
+                        if n == 0 { break; }
+                        tracking_writer.write_all(&buf[..n])
+                            .map_err(|e| anyhow::anyhow!("Passthrough write failed: {}", e))?;
+                    }
+                    Ok(())
+                })
+                .map_err(|e| anyhow::anyhow!("Passthrough copy failed for fragment {}: {}", idx, e))?;
             }
 
             let original_size = tracking_reader.size;
