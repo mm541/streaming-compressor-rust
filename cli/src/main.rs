@@ -62,6 +62,12 @@ enum Commands {
         /// Optional: Number of worker threads (default: auto-detect from CPU cores)
         #[arg(short = 'j', long)]
         threads: Option<usize>,
+
+        /// Disable content-aware compression skipping. By default, pre-compressed
+        /// files (JPEG, MP4, ZIP, etc.) are stored raw. Use this flag to force
+        /// compression on all data regardless.
+        #[arg(long, default_value_t = false)]
+        no_skip: bool,
     },
     /// Decompress a streaming archive back to its original state
     Decompress {
@@ -81,7 +87,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Compress { input, output_dir, fragment_size, level, threads } => {
+        Commands::Compress { input, output_dir, fragment_size, level, threads, no_skip } => {
             println!("Building manifest for {}...", input.display());
             let manifest = build_manifest(&input, fragment_size)?;
 
@@ -138,6 +144,7 @@ fn main() -> Result<()> {
                         Some(tx),
                         &engine,
                         skip_map,
+                        !no_skip,
                     )
                 });
 

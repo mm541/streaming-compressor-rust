@@ -75,6 +75,7 @@ fn bench_compress(input_dir: &std::path::Path, archive_dir: &std::path::Path, co
                 None,
                 &engine,
                 None,
+                true,
             ).unwrap();
             let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
             std::fs::write(archive_dir.join("manifest.json"), manifest_json).unwrap();
@@ -87,6 +88,7 @@ fn bench_compress(input_dir: &std::path::Path, archive_dir: &std::path::Path, co
             None,
             &engine,
             None,
+            true,
         ).unwrap();
         let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
         std::fs::write(archive_dir.join("manifest.json"), manifest_json).unwrap();

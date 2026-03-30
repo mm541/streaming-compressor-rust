@@ -277,6 +277,7 @@ mod tests {
             None,
             &engine,
             None,
+            true,
         ).unwrap();
 
         let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
@@ -356,6 +357,7 @@ mod tests {
             None,
             &engine,
             None,
+            true,
         ).unwrap();
 
         let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();

@@ -27,10 +27,15 @@ cli compress <INPUT> <OUTPUT_DIR> [OPTIONS]
 *   `-l, --level <LEVEL>`: The Zstandard compression density. Values range from `1` (blistering fast) to `22` (maximum space savings). Default is `3`.
 *   `-j, --threads <THREADS>`: Manually restrict how many CPU worker threads to use. By default, it auto-detects your system CPU structure and uses all of them.
 *   `-f, --fragment-size <FRAGMENT_SIZE>`: Control the exact byte size of the individual compressed fragments using human-readable strings (e.g., `500MB`, `1.5GB`). By default, the engine mathematically auto-computes optimal slicing windows to feed your CPU cores precisely without starving threads!
+*   `--no-skip`: Disable content-aware compression skipping. By default, the engine detects pre-compressed files (JPEG, MP4, ZIP, etc.) via magic bytes and file extensions and stores them raw to avoid wasting CPU cycles on incompressible data. Use this flag to force Zstd compression on **all** data regardless of content type.
 
 ### Example
 ```bash
+# Standard compression with smart detection (default)
 cli compress /home/user/personal ./my_archive -l 5 -j 8 -f 500MB
+
+# Force compress everything, including pre-compressed media
+cli compress /home/user/personal ./my_archive -f 500MB --no-skip
 ```
 
 ---

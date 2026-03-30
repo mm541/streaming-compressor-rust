@@ -52,7 +52,11 @@ impl<W: Write> Write for TrackingWriter<W> {
 ///
 /// Checks the entries that fall within this fragment's byte range.
 /// If all entries are known pre-compressed formats, skip compression.
-fn should_compress_fragment(manifest: &Manifest, fragment_idx: usize) -> bool {
+fn should_compress_fragment(manifest: &Manifest, fragment_idx: usize, auto_skip: bool) -> bool {
+    if !auto_skip {
+        return true; // Skip detection: always compress
+    }
+
     let frag_start = (fragment_idx as u64) * manifest.fragment_size;
     let frag_end = std::cmp::min(
         frag_start + manifest.fragment_size,
@@ -125,6 +129,7 @@ pub fn compress_archive<R, W, SP, WF>(
     progress_tx: Option<Sender<ProgressEvent>>,
     engine: &(dyn CompressionEngine + Sync),
     skip_map: Option<std::collections::HashMap<usize, u64>>,
+    auto_skip: bool,
 ) -> Result<Manifest>
 where
     R: ReadSeek,
@@ -176,7 +181,7 @@ where
 
             // Check if fragment is already on disk and we should skip
             if let Some(compressed_size) = skip_map.get(&idx).copied() {
-                let is_compressed = should_compress_fragment(&manifest_arc, idx);
+                let is_compressed = should_compress_fragment(&manifest_arc, idx, auto_skip);
                 let original_size = if idx == num_fragments - 1 {
                     let m = &*manifest_arc;
                     let rem = m.total_original_size % m.fragment_size;
@@ -210,7 +215,7 @@ where
             
             let mut tracking_writer = TrackingWriter { inner: output, size: 0 };
 
-            let compress = should_compress_fragment(&manifest_arc, idx);
+            let compress = should_compress_fragment(&manifest_arc, idx, auto_skip);
 
             if compress {
                 engine.compress(&mut tracking_reader, &mut tracking_writer)
