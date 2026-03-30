@@ -26,11 +26,11 @@ cli compress <INPUT> <OUTPUT_DIR> [OPTIONS]
 ### Options
 *   `-l, --level <LEVEL>`: The Zstandard compression density. Values range from `1` (blistering fast) to `22` (maximum space savings). Default is `3`.
 *   `-j, --threads <THREADS>`: Manually restrict how many CPU worker threads to use. By default, it auto-detects your system CPU structure and uses all of them.
-*   `-f, --fragment-size <BYTES>`: Control the exact byte size of the individual compressed fragments. By default, the engine mathematically auto-computes optimal slicing windows to feed your CPU cores precisely without starving threads!
+*   `-f, --fragment-size <FRAGMENT_SIZE>`: Control the exact byte size of the individual compressed fragments using human-readable strings (e.g., `500MB`, `1.5GB`). By default, the engine mathematically auto-computes optimal slicing windows to feed your CPU cores precisely without starving threads!
 
 ### Example
 ```bash
-cli compress /home/azam/personal ./my_archive -l 5 -j 8
+cli compress /home/user/personal ./my_archive -l 5 -j 8 -f 500MB
 ```
 
 ---
