@@ -45,6 +45,17 @@ pub fn walk_directory(root: &PathBuf) -> Result<Vec<StreamEntry>> {
             }
         };
 
+        let root_name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let identifier = if root_name.is_empty() {
+            relative_path
+        } else if relative_path.is_empty() {
+            root_name
+        } else {
+            // Guarantee unified slash-forward mapping safely natively
+            let combined = std::path::Path::new(&root_name).join(relative_path);
+            combined.to_string_lossy().replace('\\', "/")
+        };
+
         // Handle symlinks: record them but don't follow
         let file_type = match path.symlink_metadata() {
             Ok(meta) => meta.file_type(),
@@ -60,7 +71,7 @@ pub fn walk_directory(root: &PathBuf) -> Result<Vec<StreamEntry>> {
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned());
             entries.push(StreamEntry {
-                identifier: relative_path,
+                identifier: identifier.clone(),
                 original_size: 0,
                 permissions: 0o777,
                 modified_at: 0,
@@ -92,7 +103,7 @@ pub fn walk_directory(root: &PathBuf) -> Result<Vec<StreamEntry>> {
             }
         };
 
-        entries.push(entry_from_metadata(relative_path, &metadata));
+        entries.push(entry_from_metadata(identifier, &metadata));
     }
 
     if skipped > 0 {
@@ -150,8 +161,12 @@ mod tests {
             .map(|e| e.identifier.clone())
             .collect();
 
-        // Should be sorted alphabetically
-        assert_eq!(paths, vec!["empty.txt", "hello.txt", "subdir/nested.txt"]);
+        let root_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(paths, vec![
+            format!("{}/empty.txt", root_name),
+            format!("{}/hello.txt", root_name),
+            format!("{}/subdir/nested.txt", root_name)
+        ]);
     }
 
     #[test]
@@ -205,8 +220,10 @@ mod tests {
 
         #[cfg(unix)]
         {
+            let root_name = root.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let link_id = format!("{}/link.txt", root_name);
             // Find the symlink entry
-            let link = entries.iter().find(|e| e.identifier == "link.txt");
+            let link = entries.iter().find(|e| e.identifier == link_id);
             assert!(link.is_some(), "symlink should be recorded");
             let link = link.unwrap();
             assert_eq!(link.original_size, 0, "symlink should have 0 size");

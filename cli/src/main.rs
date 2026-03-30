@@ -104,7 +104,8 @@ fn main() -> Result<()> {
                 rayon::ThreadPoolBuilder::new().num_threads(n).build_global().unwrap_or_default();
             }
 
-            let provider = FileSystemProvider::new(&input);
+            let provider_path = input.parent().unwrap_or(&input).to_path_buf();
+            let provider = FileSystemProvider::new(&provider_path);
             let wf = fragment_writer_factory(output_dir.clone());
             let engine = ZstdEngine::new(level);
 

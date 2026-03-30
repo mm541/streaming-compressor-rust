@@ -258,7 +258,8 @@ mod tests {
         manifest.fragment_size = 16;
         manifest.fragment_start_indices = crate::manifest::builder::compute_offsets_and_indices(&mut manifest.entries, 16);
 
-        let provider = TestFsProvider { root: input_dir.path().to_path_buf() };
+        let provider_root = input_dir.path().parent().unwrap().to_path_buf();
+        let provider = TestFsProvider { root: provider_root };
         let archive_path = archive_dir.path().to_path_buf();
         let writer_factory = {
             let p = archive_path.clone();
@@ -313,10 +314,11 @@ mod tests {
             &engine,
         ).unwrap();
 
-        assert_eq!(fs::read_to_string(output_dir.path().join("f1.txt")).unwrap(), "first file data");
-        assert_eq!(fs::read_to_string(output_dir.path().join("f2.txt")).unwrap(), "second somewhat longer file");
-        assert_eq!(fs::read_to_string(output_dir.path().join("sub/f3.txt")).unwrap(), "in a subdir");
-        assert_eq!(fs::read_to_string(output_dir.path().join("empty.txt")).unwrap(), "");
+        let root_name = input_dir.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(fs::read_to_string(output_dir.path().join(&root_name).join("f1.txt")).unwrap(), "first file data");
+        assert_eq!(fs::read_to_string(output_dir.path().join(&root_name).join("f2.txt")).unwrap(), "second somewhat longer file");
+        assert_eq!(fs::read_to_string(output_dir.path().join(&root_name).join("sub/f3.txt")).unwrap(), "in a subdir");
+        assert_eq!(fs::read_to_string(output_dir.path().join(&root_name).join("empty.txt")).unwrap(), "");
     }
 
     #[test]
@@ -335,7 +337,8 @@ mod tests {
         manifest.fragment_size = 16;
         manifest.fragment_start_indices = crate::manifest::builder::compute_offsets_and_indices(&mut manifest.entries, 16);
 
-        let provider = TestFsProvider { root: input_dir.path().to_path_buf() };
+        let provider_root = input_dir.path().parent().unwrap().to_path_buf();
+        let provider = TestFsProvider { root: provider_root };
         let archive_path = archive_dir.path().to_path_buf();
         let writer_factory = {
             let p = archive_path.clone();
@@ -390,9 +393,10 @@ mod tests {
             &engine,
         ).unwrap();
 
-        assert_eq!(fs::read_to_string(output_dir.path().join("f1.txt")).unwrap(), "first file data");
-        assert_eq!(fs::read_to_string(output_dir.path().join("f2.txt")).unwrap(), "second somewhat longer file");
-        assert_eq!(fs::read_to_string(output_dir.path().join("sub/f3.txt")).unwrap(), "in a subdir");
-        assert_eq!(fs::read_to_string(output_dir.path().join("empty.txt")).unwrap(), "");
+        let root_name = input_dir.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(fs::read_to_string(output_dir.path().join(&root_name).join("f1.txt")).unwrap(), "first file data");
+        assert_eq!(fs::read_to_string(output_dir.path().join(&root_name).join("f2.txt")).unwrap(), "second somewhat longer file");
+        assert_eq!(fs::read_to_string(output_dir.path().join(&root_name).join("sub/f3.txt")).unwrap(), "in a subdir");
+        assert_eq!(fs::read_to_string(output_dir.path().join(&root_name).join("empty.txt")).unwrap(), "");
     }
 }
