@@ -127,14 +127,96 @@ where
     RF: Fn(usize) -> Result<Box<dyn Read>> + Send + Sync,
     WF: Fn(&str) -> Result<Box<dyn Write>>,
 {
-    let chunk_size = rayon::current_num_threads();
+    let max_threads = rayon::current_num_threads().max(1);
+    let max_ram_usage: u64 = 2 * 1024 * 1024 * 1024; // 2 GB safe absolute parallel memory footprint
 
     let mut current_entry_idx = 0;
     let mut bytes_written_to_current_file = 0u64;
     let mut current_writer: Option<Box<dyn Write>> = None;
 
-    for (chunk_idx, fragment_chunk) in manifest.fragments.chunks(chunk_size).enumerate() {
-        let base_idx = chunk_idx * chunk_size;
+    let mut chunk_start_idx = 0;
+    while chunk_start_idx < manifest.fragments.len() {
+        let mut chunk_end_idx = chunk_start_idx;
+        let mut current_chunk_ram = 0u64;
+
+        // Dynamically govern the parallel chunk queue to guarantee we never exhaust system RAM
+        // even if the user deliberately forces gigabyte-sized fragments via the CLI.
+        while chunk_end_idx < manifest.fragments.len() && (chunk_end_idx - chunk_start_idx) < max_threads {
+            let size = manifest.fragments[chunk_end_idx].original_size;
+            // If we are at the first fragment of the chunk, or adding this fragment keeps us under exactly 2 GB of RAM
+            if chunk_end_idx == chunk_start_idx || current_chunk_ram + size <= max_ram_usage {
+                current_chunk_ram += size;
+                chunk_end_idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        let fragment_chunk = &manifest.fragments[chunk_start_idx..chunk_end_idx];
+        let base_idx = chunk_start_idx;
+        chunk_start_idx = chunk_end_idx;
+        
+        // Optimization fallback: If the dynamic payload is so large we must restrict to a single sequential thread,
+        // instantly bypass the parallel Vector heap collector and stream the bytes natively in zero-allocation 64KB drops!
+        if fragment_chunk.len() == 1 {
+            let frag_idx = base_idx;
+            let frag_meta = &fragment_chunk[0];
+            let raw_reader = fragment_reader_factory(frag_idx)?;
+            let mut decoder: Box<dyn Read> = if frag_meta.is_compressed {
+                engine.decompressing_reader(raw_reader)?
+            } else {
+                raw_reader
+            };
+
+            let mut data_offset = 0;
+            let data_len = frag_meta.original_size;
+
+            REASSEMBLER_CHUNK_BUF.with(|buf_cell| -> Result<()> {
+                let mut chunk_buf = buf_cell.borrow_mut();
+                while data_offset < data_len {
+                    if current_entry_idx >= manifest.entries.len() {
+                        anyhow::bail!("Reached end of manifest entries but still have data to extract");
+                    }
+                    let entry = &manifest.entries[current_entry_idx];
+                    if entry.original_size == 0 {
+                        let _ = file_writer_factory(&entry.identifier)?;
+                        current_entry_idx += 1;
+                        continue;
+                    }
+                    if current_writer.is_none() {
+                        current_writer = Some(file_writer_factory(&entry.identifier)?);
+                        bytes_written_to_current_file = 0;
+                    }
+                    let file_remaining = entry.original_size - bytes_written_to_current_file;
+                    let fragment_remaining = data_len - data_offset;
+                    let bytes_to_read = file_remaining.min(fragment_remaining).min(chunk_buf.len() as u64) as usize;
+
+                    let n = decoder.read(&mut chunk_buf[..bytes_to_read])?;
+                    if n == 0 { anyhow::bail!("Unexpected EOF while streaming decompressor fragment {}", frag_idx); }
+
+                    current_writer.as_mut().unwrap().write_all(&chunk_buf[..n])?;
+                    data_offset += n as u64;
+                    bytes_written_to_current_file += n as u64;
+
+                    if bytes_written_to_current_file == entry.original_size {
+                        current_writer = None;
+                        current_entry_idx += 1;
+                    }
+                }
+                let mut sink = [0u8; 1];
+                if decoder.read(&mut sink)? != 0 { anyhow::bail!("Decompressor produced more bytes than registered in Manifest metadata."); }
+                Ok(())
+            })?;
+
+            if let Some(tx) = &progress_tx {
+                let _ = tx.send(ProgressEvent::FragmentCompleted {
+                    idx: frag_idx,
+                    original_size: frag_meta.original_size,
+                    compressed_size: frag_meta.compressed_size,
+                });
+            }
+            continue; // Safely extracted massive solitary chunk in O(1) memory! Move dynamically to next chunk logic!
+        }
 
         // Step 1: Parallel decompress this chunk
         let decompressed_chunk: Result<Vec<Vec<u8>>> = fragment_chunk
