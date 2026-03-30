@@ -18,6 +18,19 @@ pub const MIN_FRAGMENT_SIZE: u64 = 1024 * 1024;
 /// Maximum allowed fragment size: 4 GB
 pub const MAX_FRAGMENT_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Helper to compute an optimal fragment size based on total data and CPU cores.
+/// 
+/// Heuristic: Target ~4 fragments per CPU thread for good Rayon load balancing,
+/// clamped between 1 MB and 64 MB.
+pub fn optimal_fragment_size(total_size: u64, num_cpus: usize) -> u64 {
+    if total_size == 0 || num_cpus == 0 {
+        return MIN_FRAGMENT_SIZE;
+    }
+    let target_fragments = (num_cpus as u64) * 4;
+    let computed_size = total_size / target_fragments;
+    computed_size.clamp(MIN_FRAGMENT_SIZE, 64 * 1024 * 1024)
+}
+
 /// Assign sequential byte offsets to each entry, and compute fragment start indices.
 pub fn compute_offsets_and_indices(entries: &mut [StreamEntry], fragment_size: u64) -> Vec<usize> {
     let mut offset: u64 = 0;
@@ -67,22 +80,13 @@ pub fn entry_from_metadata(identifier: String, metadata: &std::fs::Metadata) -> 
         permissions,
         modified_at,
         byte_offset: 0,
-        checksum: None,
         symlink_target: None,
     }
 }
 
 /// Build a complete manifest from a directory or single file path.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn build_manifest(root: &Path, fragment_size: u64) -> Result<Manifest> {
-    anyhow::ensure!(
-        fragment_size >= MIN_FRAGMENT_SIZE && fragment_size <= MAX_FRAGMENT_SIZE,
-        "fragment_size must be between {} bytes (1 MB) and {} bytes (4 GB), got {}",
-        MIN_FRAGMENT_SIZE,
-        MAX_FRAGMENT_SIZE,
-        fragment_size
-    );
-
+pub fn build_manifest(root: &Path, fragment_size: Option<u64>) -> Result<Manifest> {
     let root = root
         .canonicalize()
         .with_context(|| format!("path does not exist: {}", root.display()))?;
@@ -106,9 +110,22 @@ pub fn build_manifest(root: &Path, fragment_size: u64) -> Result<Manifest> {
         vec![entry_from_metadata(file_name, &metadata)]
     };
 
-    let fragment_start_indices = compute_offsets_and_indices(&mut entries, fragment_size);
-
     let total_original_size = entries.iter().map(|e| e.original_size).sum();
+
+    let resolved_fragment_size = fragment_size.unwrap_or_else(|| {
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+        optimal_fragment_size(total_original_size, cpus)
+    });
+
+    anyhow::ensure!(
+        (MIN_FRAGMENT_SIZE..=MAX_FRAGMENT_SIZE).contains(&resolved_fragment_size),
+        "fragment_size must be between {} bytes (1 MB) and {} bytes (4 GB), got {}",
+        MIN_FRAGMENT_SIZE,
+        MAX_FRAGMENT_SIZE,
+        resolved_fragment_size
+    );
+
+    let fragment_start_indices = compute_offsets_and_indices(&mut entries, resolved_fragment_size);
 
     let created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -119,7 +136,7 @@ pub fn build_manifest(root: &Path, fragment_size: u64) -> Result<Manifest> {
         version: 1,
         created_at,
         total_original_size,
-        fragment_size,
+        fragment_size: resolved_fragment_size,
         algo: CompressionAlgo::Zstd, // Defaulting to native target choice
         is_directory,
         entries,

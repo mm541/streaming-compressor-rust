@@ -52,9 +52,13 @@ pub struct FragmentMeta {
     /// Will match Manifest.fragment_size except for the last fragment.
     pub original_size: u64,
 
-    /// Hex-encoded hash of the *compressed* fragment for fast disk corruption checks.
-    pub checksum: String,
+    /// Whether this fragment was actually compressed.
+    /// If false, the fragment was stored raw (content-aware skipping).
+    #[serde(default = "default_true")]
+    pub is_compressed: bool,
 }
+
+fn default_true() -> bool { true }
 
 /// A generic logical stream entry (e.g., a file) in the archive.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -73,9 +77,6 @@ pub struct StreamEntry {
 
     /// Byte offset where this entry's data starts in the contiguous byte stream.
     pub byte_offset: u64,
-
-    /// Hex-encoded hash of the stream contents for integrity verification.
-    pub checksum: Option<String>,
 
     /// If this entry is a symlink, the target identifier. None for regular streams.
     pub symlink_target: Option<String>,

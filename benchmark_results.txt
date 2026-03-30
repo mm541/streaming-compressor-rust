@@ -1,23 +1,18 @@
-═══════════════════════════════════════════════════════════════════
- AUTO-THREAD BENCHMARK (CLI) — /home/azam/personal (~48.5 GB)
- Fragment size: 1 MB (Default)
-═══════════════════════════════════════════════════════════════════
+   Compiling cli v0.1.0 (/home/azam/personal/fun/compressor/cli)
+    Finished `release` profile [optimized] target(s) in 4.51s
+     Running `target/release/benchmark /home/azam/personal`
+═══════════════════════════════════════════════
+ Compressor Benchmark — Target: /home/azam/personal
+═══════════════════════════════════════════════
 
-Threads  | Wall Time    | CPU Usage    | Peak RAM     | Throughput  | Speedup
----------+--------------+--------------+--------------+-------------+-----------
-Auto     | 0:43.87      | 749%         | 303.4 MB     | 1106.3 MB/s | N/A
+[1/5] Using existing data at '/home/azam/personal'. Skipping generation...
 
- Storage Metrics:
- - Original Size:     48.53 GB (48,532,791,827 bytes)
- - Compressed Size:   20.78 GB (20,781,327,402 bytes)
- - Compression Ratio: 2.34x (Storage Reduced by 57.18%)
+[2/5] Compress (auto concurrency)...
+  Compression: 150.72s | 20 workers | 314.5 MB/s | ratio: 43.3%
+  Peak RAM (Compression): 232.52 MB
 
-═══════════════════════════════════════════════════════════════════
- COMPARISON: TAR + ZSTD (Multi-threaded) — /home/azam/personal
- Command: tar -cf - <dir> | zstd -T0 -3 -o <archive>
-═══════════════════════════════════════════════════════════════════
+[3/5] Decompress (auto concurrency)...
 
- Tool     | Wall Time | CPU Usage | Peak RAM | Compressed Size | Speedup vs Tar
- ---------+-----------+-----------+----------+-----------------+---------------
- tar+zstd | 100.28s   | 192%      | 359.4 MB | 19.01 GB        | Baseline
- CLI Tool | 43.87s    | 749%      | 303.4 MB | 20.78 GB        | 2.28x Faster
+thread 'main' (45628) panicked at cli/src/bin/benchmark.rs:137:87:
+called `Result::unwrap()` on an `Err` value: No space left on device (os error 28)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

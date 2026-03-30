@@ -18,13 +18,13 @@ use super::{StreamEntry, entry_from_metadata};
 /// - Special files (sockets, FIFOs, device files) are **skipped**.
 ///
 /// `byte_offset` is set to 0 — call `compute_byte_offsets` afterwards.
-/// `checksum` is set to None — populated later when file data is read.
+/// `symlink_target` is set to None for regular files.
 pub fn walk_directory(root: &PathBuf) -> Result<Vec<StreamEntry>> {
     let mut entries = Vec::new();
     let mut skipped = 0usize;
 
     // follow_links(false) prevents infinite symlink cycles
-    for dir_entry in WalkDir::new(&root).follow_links(false).skip_hidden(false) {
+    for dir_entry in WalkDir::new(root).follow_links(false).skip_hidden(false) {
         let dir_entry = match dir_entry {
             Ok(e) => e,
             Err(err) => {
@@ -36,7 +36,7 @@ pub fn walk_directory(root: &PathBuf) -> Result<Vec<StreamEntry>> {
 
         let path = dir_entry.path();
 
-        let relative_path = match path.strip_prefix(&root) {
+        let relative_path = match path.strip_prefix(root) {
             Ok(rel) => rel.to_string_lossy().into_owned(),
             Err(_) => {
                 eprintln!("  [WARN] skipping (cannot strip prefix): {}", path.display());
@@ -65,7 +65,6 @@ pub fn walk_directory(root: &PathBuf) -> Result<Vec<StreamEntry>> {
                 permissions: 0o777,
                 modified_at: 0,
                 byte_offset: 0,
-                checksum: None,
                 symlink_target: target,
             });
             continue;
@@ -180,7 +179,7 @@ mod tests {
     #[test]
     fn test_build_manifest() {
         let dir = create_test_dir();
-        let manifest = build_manifest(dir.path(), 1024 * 1024).unwrap();
+        let manifest = build_manifest(dir.path(), Some(1024 * 1024)).unwrap();
 
         assert_eq!(manifest.version, 1);
         assert_eq!(manifest.fragment_size, 1024 * 1024);
