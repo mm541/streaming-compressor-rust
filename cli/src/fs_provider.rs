@@ -40,13 +40,23 @@ pub fn fragment_reader_factory(archive_dir: PathBuf) -> impl Fn(usize) -> Result
     }
 }
 
-/// Creates a closure that produces `Write` sinks for output files, creating parent directories as needed.
-pub fn file_writer_factory(output_dir: PathBuf) -> impl Fn(&str) -> Result<Box<dyn std::io::Write>> {
-    move |identifier: &str| {
+/// Pre-allocates and truncates a target output file natively building directories if required.
+pub fn file_initializer(output_dir: PathBuf) -> impl Fn(&str, u64) -> Result<()> + Send + Sync + Clone {
+    move |identifier: &str, size: u64| {
         let path = output_dir.join(identifier);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        Ok(Box::new(File::create(&path)?) as Box<dyn std::io::Write>)
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        let f = File::create(&path)?;
+        f.set_len(size)?;
+        Ok(())
+    }
+}
+
+/// Creates a closure that produces `Write` sinks pointing mathematically at extreme offset values over random-access descriptors.
+pub fn file_writer_factory_at(output_dir: PathBuf) -> impl Fn(&str, u64) -> Result<Box<dyn std::io::Write>> + Send + Sync + Clone {
+    move |identifier: &str, offset: u64| {
+        let path = output_dir.join(identifier);
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path)?;
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(offset))?;
+        Ok(Box::new(file) as Box<dyn std::io::Write>)
     }
 }

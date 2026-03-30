@@ -6,7 +6,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use core::compressor::ZstdEngine;
 use core::manifest::{build_manifest, save_manifest, load_manifest};
 use core::progress::ProgressEvent;
-use cli::fs_provider::{FileSystemProvider, fragment_writer_factory, fragment_reader_factory, file_writer_factory};
+use cli::fs_provider::{FileSystemProvider, fragment_writer_factory, fragment_reader_factory, file_writer_factory_at, file_initializer};
 
 /// A custom parser for human-readable byte sizes natively built for clap.
 fn parse_size(s: &str) -> Result<u64, String> {
@@ -170,7 +170,8 @@ fn main() -> Result<()> {
             }
 
             let rf = fragment_reader_factory(archive_dir.clone());
-            let ff = file_writer_factory(output_dir.clone());
+            let fi = file_initializer(output_dir.clone());
+            let ff = file_writer_factory_at(output_dir.clone());
             let engine = ZstdEngine::new(3);
 
             std::thread::scope(|s| {
@@ -181,6 +182,7 @@ fn main() -> Result<()> {
                         core::reassembler::extract_archive(
                             &manifest,
                             rf,
+                            fi,
                             ff,
                             Some(tx),
                             &engine,
@@ -189,6 +191,7 @@ fn main() -> Result<()> {
                         core::reassembler::parallel_extract_archive(
                             &manifest,
                             rf,
+                            fi,
                             ff,
                             Some(tx),
                             &engine,

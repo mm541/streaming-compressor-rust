@@ -4,7 +4,7 @@ use core::compressor::ZstdEngine;
 use core::manifest::build_manifest;
 use core::publisher::compress_archive;
 
-use cli::fs_provider::{FileSystemProvider, fragment_writer_factory, fragment_reader_factory, file_writer_factory};
+use cli::fs_provider::{FileSystemProvider, fragment_writer_factory, fragment_reader_factory, file_writer_factory_at, file_initializer};
 
 fn generate_test_data(dir: &std::path::Path, total_mb: usize) {
     // Create a mix of file sizes to simulate real workloads
@@ -119,23 +119,32 @@ fn bench_decompress(archive_dir: &std::path::Path, output_dir: &std::path::Path,
 
     std::fs::create_dir_all(output_dir).unwrap();
 
+    if let Some(threads) = concurrency {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| {
+            let rf = fragment_reader_factory(archive_dir.to_path_buf());
+            let fi = file_initializer(output_dir.to_path_buf());
+            let ff = file_writer_factory_at(output_dir.to_path_buf());
+            let engine = ZstdEngine::new(3);
+
+            let start = Instant::now();
+            if threads == 1 {
+                core::reassembler::extract_archive(&manifest, rf, fi, ff, None, &engine).unwrap();
+            } else {
+                core::reassembler::parallel_extract_archive(&manifest, rf, fi, ff, None, &engine).unwrap();
+            }
+            let elapsed = start.elapsed();
+            return elapsed;
+        });
+    }
+    
     let rf = fragment_reader_factory(archive_dir.to_path_buf());
-    let ff = file_writer_factory(output_dir.to_path_buf());
+    let fi = file_initializer(output_dir.to_path_buf());
+    let ff = file_writer_factory_at(output_dir.to_path_buf());
     let engine = ZstdEngine::new(3);
 
     let start = Instant::now();
-    if let Some(n) = concurrency {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(n).build().unwrap();
-        pool.install(|| {
-            if n == 1 {
-                core::reassembler::extract_archive(&manifest, rf, ff, None, &engine).unwrap();
-            } else {
-                core::reassembler::parallel_extract_archive(&manifest, rf, ff, None, &engine).unwrap();
-            }
-        });
-    } else {
-        core::reassembler::parallel_extract_archive(&manifest, rf, ff, None, &engine).unwrap();
-    }
+    core::reassembler::parallel_extract_archive(&manifest, rf, fi, ff, None, &engine).unwrap();
     let elapsed = start.elapsed();
 
     let n_workers = concurrency.unwrap_or_else(rayon::current_num_threads);
