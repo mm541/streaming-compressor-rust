@@ -8,6 +8,32 @@ use core::manifest::{build_manifest, save_manifest, load_manifest};
 use core::progress::ProgressEvent;
 use cli::fs_provider::{FileSystemProvider, fragment_writer_factory, fragment_reader_factory, file_writer_factory};
 
+/// A custom parser for human-readable byte sizes natively built for clap.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let mut num_str = String::new();
+    let mut suffix = String::new();
+    
+    for c in s.chars() {
+        if c.is_ascii_digit() || c == '.' { num_str.push(c); } 
+        else if c.is_alphabetic() { suffix.push(c); }
+    }
+    
+    let num = num_str.parse::<f64>().map_err(|_| format!("Invalid number provided: '{}'", num_str))?;
+    let suffix = suffix.to_uppercase();
+    
+    let multiplier = match suffix.as_str() {
+        "B" | "" => 1.0,
+        "KB" | "K" => 1024.0,
+        "MB" | "M" => 1024.0 * 1024.0,
+        "GB" | "G" => 1024.0 * 1024.0 * 1024.0,
+        "TB" | "T" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return Err(format!("Unknown size suffix: {}", suffix)),
+    };
+    
+    Ok((num * multiplier) as u64)
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -25,8 +51,8 @@ enum Commands {
         /// The directory where the compressed archive files will be saved
         output_dir: PathBuf,
 
-        /// Optional: Fragment size in bytes. If omitted, computes an adaptive optimal size based on CPU cores.
-        #[arg(short, long)]
+        /// Optional: Fragment size in human readable format (e.g. "500MB", "1.5GB"). If omitted, computes an adaptive optimal size based on CPU cores.
+        #[arg(short, long, value_parser = parse_size)]
         fragment_size: Option<u64>,
 
         /// Compression level (1=fastest, 22=best ratio, default: 3)
