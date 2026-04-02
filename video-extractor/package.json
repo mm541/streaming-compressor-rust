@@ -1,0 +1,30 @@
+{
+  "name": "@mm541/video-extractor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "types": "./src/index.ts"
+    },
+    "./worker": {
+      "import": "./src/extract-worker.ts",
+      "types": "./src/extract-worker.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mm541/wasm-compressor": "*",
+    "web-demuxer": "^4.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  }
+}

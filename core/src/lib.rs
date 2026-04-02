@@ -3,5 +3,7 @@ pub mod compressor;
 pub mod stream;
 pub mod progress;
 pub mod detection;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod publisher;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod reassembler;

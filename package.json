@@ -1,0 +1,11 @@
+{
+  "name": "compressor-workspace",
+  "private": true,
+  "workspaces": [
+    "wasm",
+    "video-extractor"
+  ],
+  "devDependencies": {
+    "@types/estree": "^1.0.8"
+  }
+}
