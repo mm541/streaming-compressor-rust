@@ -71,6 +71,6 @@ If you wish to test your raw physical maximum I/O limit or visualize the exact s
 cargo run --release --bin benchmark
 
 # Custom Dataset Memory/Filesystem Benchmark (Massively rigorous!)
-cargo run --release --bin benchmark /home/azam/personal
+cargo run --release --bin benchmark /path/to/your/data
 ```
 *Note: The built-in benchmark automatically parses your system's `VmHWM` footprint to report exact peak RAM footprints, calculates compression ratios, and compares everything automatically.*

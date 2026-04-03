@@ -1,20 +1,112 @@
-/**
- * Production-grade streaming upload engine.
- * Supports: single files, directories, auto compression detection,
- * Web Worker parallelism, backpressure, resumable uploads, progress,
- * retry logic, and blake3 integrity checksums.
- */
+// ════════════════════════════════════════════════
+// Streaming Upload Engine — Direct-to-S3
+// ════════════════════════════════════════════════
+//
+// The library does NOT call any backend endpoints itself.
+// The consumer provides two callbacks:
+//   - getPresignedUrls() → how to get S3 URLs (frontend's job)
+//   - onUploadComplete() → what to do with metadata (frontend's job)
 
 // ════════════════════════════════════════════════
-// Persistent Worker Warm Pool
+// Types
+// ════════════════════════════════════════════════
+
+export interface PresignedUrl {
+    key: string;
+    url: string;
+}
+
+export interface FileDescriptor {
+    name: string;
+    size: number;
+    mimeType: string;
+}
+
+export interface S3FileMetadata {
+    s3Key: string;
+    originalName: string;
+    size: number;
+    mimeType: string;
+    compressed: boolean;
+    originalSize?: number;
+}
+
+export interface UploadOptions {
+    /**
+     * Callback to obtain presigned S3 PUT URLs.
+     * The frontend is responsible for calling its own backend.
+     */
+    getPresignedUrls: (files: FileDescriptor[]) => Promise<PresignedUrl[]>;
+    /**
+     * Called after all files are uploaded to S3 with the full metadata.
+     * The frontend can send this to its backend, save it, etc.
+     */
+    onUploadComplete?: (info: { totalFiles: number; files: S3FileMetadata[] }) => Promise<void> | void;
+    /** Size threshold in bytes above which compression is attempted (default: 1MB) */
+    compressThreshold?: number;
+    /** Max concurrent S3 uploads (default: 6) */
+    concurrency?: number;
+    /** Progress callback */
+    onProgress?: (info: UploadProgressInfo) => void;
+    /** Per-file complete callback */
+    onFileComplete?: (info: { file: string; compressed: boolean; s3Key: string }) => void;
+    /** Error callback */
+    onError?: (error: Error) => void;
+}
+
+export interface UploadProgressInfo {
+    phase: 'compressing' | 'uploading' | 'complete';
+    file: string;
+    uploaded: number;
+    total: number;
+    percent: number;
+}
+
+// ════════════════════════════════════════════════
+// Extension-Based Compression Skip
+// ════════════════════════════════════════════════
+
+const SKIP_EXTENSIONS = new Set([
+    'mp4', 'webm', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'm4v',
+    'mp3', 'aac', 'ogg', 'flac', 'wma', 'm4a', 'opus',
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'heic',
+    'zip', 'gz', 'bz2', 'xz', 'zst', 'rar', '7z', 'tar.gz', 'tgz',
+    'pdf', 'docx', 'xlsx', 'pptx',
+]);
+
+function shouldSkipCompression(filename: string): boolean {
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    return SKIP_EXTENSIONS.has(ext);
+}
+
+// ════════════════════════════════════════════════
+// MIME Type Detection
+// ════════════════════════════════════════════════
+
+const MIME_TYPES: Record<string, string> = {
+    mp4: 'video/mp4', webm: 'video/webm', mkv: 'video/x-matroska',
+    avi: 'video/x-msvideo', mov: 'video/quicktime',
+    mp3: 'audio/mpeg', wav: 'audio/wav', flac: 'audio/flac',
+    ogg: 'audio/ogg',
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+    gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+    pdf: 'application/pdf', zip: 'application/zip',
+    gz: 'application/gzip', tar: 'application/x-tar',
+    txt: 'text/plain', json: 'application/json',
+    csv: 'text/csv', xml: 'application/xml',
+};
+
+function detectMimeType(filename: string): string {
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    return MIME_TYPES[ext] || 'application/octet-stream';
+}
+
+// ════════════════════════════════════════════════
+// Worker Pool (for WASM Compression)
 // ════════════════════════════════════════════════
 
 let workerPool: Worker[] | null = null;
 
-/**
- * Initialize a persistent pool of Web Workers.
- * Call once on app startup. Workers stay alive across uploads.
- */
 export function initWorkerPool(count?: number) {
     const numWorkers = count || navigator.hardwareConcurrency || 4;
     if (workerPool && workerPool.length === numWorkers) return;
@@ -22,12 +114,11 @@ export function initWorkerPool(count?: number) {
 
     workerPool = [];
     for (let i = 0; i < numWorkers; i++) {
-        workerPool.push(new Worker(new URL('./worker.js', import.meta.url), { type: 'module' }));
+        workerPool.push(new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' }));
     }
     console.log(`[Compressor] Warm pool: ${numWorkers} workers`);
 }
 
-/** Destroy the worker pool on app teardown. */
 export function destroyWorkerPool() {
     if (workerPool) {
         workerPool.forEach((w: Worker) => w.terminate());
@@ -36,147 +127,155 @@ export function destroyWorkerPool() {
 }
 
 // ════════════════════════════════════════════════
-// Resumable State (localStorage)
+// WASM Compression via Worker
 // ════════════════════════════════════════════════
 
-function getUploadKey(file: File) {
-    return `compressor_${file.name}_${file.size}_${file.lastModified}`;
-}
+let nextMsgId = 0;
 
-function getCompletedChunks(file: File) {
-    try {
-        const stored = localStorage.getItem(getUploadKey(file));
-        return stored ? new Set(JSON.parse(stored)) : new Set();
-    } catch { return new Set(); }
-}
+function compressInWorker(file: File): Promise<{ data: Uint8Array; compressed: boolean; originalSize: number }> {
+    return new Promise((resolve, reject) => {
+        const workers = workerPool || (() => {
+            const pool = [new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })];
+            return pool;
+        })();
 
-function markChunkCompleted(file: File, idx: number) {
-    try {
-        const completed = getCompletedChunks(file);
-        completed.add(idx);
-        localStorage.setItem(getUploadKey(file), JSON.stringify([...completed]));
-    } catch {}
-}
+        const id = nextMsgId++;
+        const worker = workers[id % workers.length];
 
-function clearUploadState(file: File) {
-    try { localStorage.removeItem(getUploadKey(file)); } catch {}
+        const handler = (e: MessageEvent) => {
+            const msg = e.data;
+            if (msg.id !== id) return;
+
+            worker.removeEventListener('message', handler);
+
+            if (msg.type === 'compressed') {
+                resolve({
+                    data: msg.data,
+                    compressed: !msg.skipped,
+                    originalSize: msg.originalSize,
+                });
+            } else if (msg.type === 'error') {
+                reject(new Error(msg.error));
+            }
+        };
+
+        worker.addEventListener('message', handler);
+        worker.postMessage({ id, file, start: 0, end: file.size });
+    });
 }
 
 // ════════════════════════════════════════════════
-// Single File Upload (core engine)
+// S3 Upload with Retry
+// ════════════════════════════════════════════════
+
+const MAX_RETRIES = 3;
+const BASE_DELAY_MS = 500;
+
+async function uploadToS3(url: string, body: Blob | Uint8Array, mimeType: string): Promise<void> {
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const response = await fetch(url, {
+                method: 'PUT',
+                headers: { 'Content-Type': mimeType },
+                body: body as any,
+            });
+            if (response.ok || response.status === 200) return;
+            if (response.status < 500) throw new Error(`S3 upload failed: ${response.status}`);
+        } catch (error) {
+            if (attempt === MAX_RETRIES) throw error;
+        }
+        const delay = BASE_DELAY_MS * Math.pow(2, attempt);
+        await new Promise(resolve => setTimeout(resolve, delay));
+    }
+}
+
+// ════════════════════════════════════════════════
+// Bounded Parallel Execution
+// ════════════════════════════════════════════════
+
+async function parallelExec<T>(
+    tasks: (() => Promise<T>)[],
+    concurrency: number,
+): Promise<T[]> {
+    const results: T[] = new Array(tasks.length);
+    let index = 0;
+
+    async function next(): Promise<void> {
+        while (index < tasks.length) {
+            const current = index++;
+            results[current] = await tasks[current]();
+        }
+    }
+
+    await Promise.all(
+        Array.from({ length: Math.min(concurrency, tasks.length) }, () => next()),
+    );
+
+    return results;
+}
+
+// ════════════════════════════════════════════════
+// Single File Upload
 // ════════════════════════════════════════════════
 
 /**
- * Upload a single file with chunking, compression auto-detection, and all features.
- * @param {File} file
- * @param {Object} options
- * @param {string} [options.relativePath] - Path within directory (for directory uploads)
- * @param {number} [options.chunkSize=1048576]
- * @param {number} [options.maxConcurrentUploads=3]
- * @param {boolean} [options.resumable=true]
- * @param {string} [options.uploadUrl]
- * @param {function} [options.onProgress]
- * @param {function} [options.onFileComplete]
- * @param {function} [options.onError]
+ * Upload a single file directly to S3.
+ * Compresses via WASM if beneficial. Consumer provides getPresignedUrls callback.
  */
-export async function uploadFile(file: File, options: any = {}): Promise<any> {
+export async function uploadFile(file: File, options: UploadOptions): Promise<S3FileMetadata> {
     const {
-        relativePath = null,
-        chunkSize = 1024 * 1024,
-        maxConcurrentUploads = 3,
-        resumable = true,
-        uploadUrl = null,
-        onProgress = () => {},
-        onFileComplete = () => {},
-        onError = () => {},
+        getPresignedUrls,
+        onUploadComplete,
+        compressThreshold = 1024 * 1024,
+        onProgress,
+        onFileComplete,
+        onError,
     } = options;
 
-    const totalChunks = Math.ceil(file.size / chunkSize);
-    const ownWorkers = !workerPool;
-    const workers = workerPool || (() => {
-        const n = Math.min(navigator.hardwareConcurrency || 4, totalChunks);
-        const pool = [];
-        for (let i = 0; i < n; i++) {
-            pool.push(new Worker(new URL('./worker.js', import.meta.url), { type: 'module' }));
+    try {
+        const mimeType = detectMimeType(file.name);
+        const shouldCompress = !shouldSkipCompression(file.name) && file.size > compressThreshold;
+
+        // 1. Get presigned URL via consumer callback
+        const presignedUrls = await getPresignedUrls([{ name: file.name, size: file.size, mimeType }]);
+        const presigned = presignedUrls[0];
+
+        // 2. Compress if needed
+        let uploadBody: Blob | Uint8Array = file;
+        let compressed = false;
+        let originalSize = file.size;
+
+        if (shouldCompress) {
+            onProgress?.({ phase: 'compressing', file: file.name, uploaded: 0, total: 1, percent: 0 });
+            const result = await compressInWorker(file);
+            uploadBody = result.data;
+            compressed = result.compressed;
+            originalSize = result.originalSize;
         }
-        return pool;
-    })();
 
-    const completedChunks = resumable ? getCompletedChunks(file) : new Set();
-    let nextChunk = 0;
-    let uploadedCount = completedChunks.size;
-    let activeWorkers = 0;
+        // 3. Upload to S3
+        onProgress?.({ phase: 'uploading', file: file.name, uploaded: 0, total: 1, percent: 50 });
+        await uploadToS3(presigned.url, uploadBody, mimeType);
 
-    return new Promise((resolve, reject) => {
-        function tryDispatch() {
-            if (uploadedCount === totalChunks) {
-                if (ownWorkers) workers.forEach((w: Worker) => w.terminate());
-                if (resumable) clearUploadState(file);
-                onFileComplete({ file: relativePath || file.name, totalChunks });
-                return resolve({ file: relativePath || file.name, totalChunks });
-            }
+        const meta: S3FileMetadata = {
+            s3Key: presigned.key,
+            originalName: file.name,
+            size: uploadBody instanceof Uint8Array ? uploadBody.length : (uploadBody as Blob).size,
+            mimeType,
+            compressed,
+            originalSize,
+        };
 
-            while (nextChunk < totalChunks && activeWorkers < workers.length) {
-                const idx = nextChunk++;
-                if (completedChunks.has(idx)) continue;
+        onProgress?.({ phase: 'complete', file: file.name, uploaded: 1, total: 1, percent: 100 });
+        onFileComplete?.({ file: file.name, compressed, s3Key: presigned.key });
+        await onUploadComplete?.({ totalFiles: 1, files: [meta] });
 
-                activeWorkers++;
-                const worker = workers[idx % workers.length];
-                const start = idx * chunkSize;
-                const end = Math.min(start + chunkSize, file.size);
-
-                const handler = (e: MessageEvent) => {
-                    const msg = e.data;
-                    if (msg.id !== idx) return;
-
-                    if (msg.type === 'compressed') {
-                        onProgress({
-                            phase: 'compressed',
-                            file: relativePath || file.name,
-                            chunkIndex: idx, totalChunks,
-                            originalSize: msg.originalSize,
-                            compressedSize: msg.compressedSize,
-                            checksum: msg.checksum,
-                            skipped: msg.skipped,
-                        });
-                    }
-
-                    if (msg.type === 'uploaded') {
-                        worker.removeEventListener('message', handler);
-                        activeWorkers--;
-                        uploadedCount++;
-                        if (resumable) markChunkCompleted(file, idx);
-
-                        onProgress({
-                            phase: 'uploaded',
-                            file: relativePath || file.name,
-                            chunkIndex: idx, totalChunks,
-                            percent: Math.round((uploadedCount / totalChunks) * 100),
-                        });
-                        tryDispatch();
-                    }
-
-                    if (msg.type === 'error') {
-                        worker.removeEventListener('message', handler);
-                        activeWorkers--;
-                        if (ownWorkers) workers.forEach((w: Worker) => w.terminate());
-                        const err = new Error(`${relativePath || file.name} chunk ${idx}: ${msg.error}`);
-                        onError(err);
-                        reject(err);
-                    }
-                };
-
-                worker.addEventListener('message', handler);
-                worker.postMessage({
-                    id: idx, file, start, end,
-                    index: idx,
-                    uploadUrl,
-                    relativePath: relativePath || file.name,
-                });
-            }
-        }
-        tryDispatch();
-    });
+        return meta;
+    } catch (e: any) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        onError?.(error);
+        throw error;
+    }
 }
 
 // ════════════════════════════════════════════════
@@ -184,118 +283,87 @@ export async function uploadFile(file: File, options: any = {}): Promise<any> {
 // ════════════════════════════════════════════════
 
 /**
- * Upload an entire directory. Files are compressed or uploaded raw
- * automatically based on their extension.
- *
- * Usage:
- *   <input type="file" webkitdirectory id="dirInput">
- *   const files = document.getElementById('dirInput').files;
- *   await uploadDirectory(files, { ... });
- *
- * @param {FileList} fileList - From an <input webkitdirectory> element
- * @param {Object} options
- * @param {number} [options.chunkSize=1048576]
- * @param {number} [options.maxConcurrentUploads=3]
- * @param {boolean} [options.resumable=true]
- * @param {string} [options.uploadUrl]
- * @param {function} [options.onProgress] - Per-chunk: { file, chunkIndex, totalChunks, percent }
- * @param {function} [options.onFileComplete] - Per-file: { file, totalChunks }
- * @param {function} [options.onDirectoryComplete] - All files done: { totalFiles, manifest }
- * @param {function} [options.onError]
+ * Upload an entire directory directly to S3.
+ * Consumer provides getPresignedUrls callback.
  */
-export async function uploadDirectory(fileList: FileList, options: any = {}): Promise<any> {
+export async function uploadDirectory(fileList: FileList, options: UploadOptions): Promise<{ totalFiles: number; files: S3FileMetadata[] }> {
     const {
-        chunkSize = 1024 * 1024,
-        maxConcurrentUploads = 3,
-        resumable = true,
-        uploadUrl = null,
-        onProgress = () => {},
-        onFileComplete = () => {},
-        onDirectoryComplete = () => {},
-        onError = () => {},
+        getPresignedUrls,
+        onUploadComplete,
+        compressThreshold = 1024 * 1024,
+        concurrency = 6,
+        onProgress,
+        onFileComplete,
+        onError,
     } = options;
 
-    const files = Array.from(fileList);
-    const manifest = [];
+    const files = Array.from(fileList).filter(f => !f.name.startsWith('.') && f.size > 0);
+    console.log(`[Compressor] Uploading directory: ${files.length} files directly to S3`);
 
-    console.log(`[Compressor] Uploading directory: ${files.length} files`);
+    try {
+        // 1. Request presigned URLs for ALL files via consumer callback
+        const descriptors: FileDescriptor[] = files.map(f => ({
+            name: f.webkitRelativePath || f.name,
+            size: f.size,
+            mimeType: detectMimeType(f.name),
+        }));
 
-    // Process files sequentially (each file uses parallel chunk workers internally)
-    for (const file of files) {
-        // Skip hidden files and empty files
-        if (file.name.startsWith('.') || file.size === 0) continue;
+        const presignedUrls = await getPresignedUrls(descriptors);
 
-        const relativePath = file.webkitRelativePath || file.name;
+        // 2. Compress + upload each file in parallel (bounded)
+        let uploaded = 0;
+        const total = files.length;
 
-        try {
-            const result = await uploadFile(file, {
-                relativePath,
-                chunkSize,
-                maxConcurrentUploads,
-                resumable,
-                uploadUrl,
-                onProgress,
-                onFileComplete,
-                onError,
+        const tasks = files.map((file, i) => async () => {
+            const mimeType = detectMimeType(file.name);
+            const shouldCompress = !shouldSkipCompression(file.name) && file.size > compressThreshold;
+
+            let uploadBody: Blob | Uint8Array = file;
+            let compressed = false;
+            let originalSize = file.size;
+
+            if (shouldCompress) {
+                const result = await compressInWorker(file);
+                uploadBody = result.data;
+                compressed = result.compressed;
+                originalSize = result.originalSize;
+            }
+
+            await uploadToS3(presignedUrls[i].url, uploadBody, mimeType);
+
+            uploaded++;
+            onProgress?.({
+                phase: 'uploading',
+                file: file.webkitRelativePath || file.name,
+                uploaded,
+                total,
+                percent: Math.round((uploaded / total) * 100),
+            });
+            onFileComplete?.({
+                file: file.webkitRelativePath || file.name,
+                compressed,
+                s3Key: presignedUrls[i].key,
             });
 
-            manifest.push({
-                relativePath,
-                totalChunks: result.totalChunks,
-                size: file.size,
-            });
+            return {
+                s3Key: presignedUrls[i].key,
+                originalName: file.webkitRelativePath || file.name,
+                size: uploadBody instanceof Uint8Array ? uploadBody.length : (uploadBody as Blob).size,
+                mimeType,
+                compressed,
+                originalSize,
+            } as S3FileMetadata;
+        });
 
-        } catch (err) {
-            onError(err);
-            throw err;
-        }
+        const allMeta = await parallelExec(tasks, concurrency);
+
+        // 3. Notify consumer with metadata
+        await onUploadComplete?.({ totalFiles: allMeta.length, files: allMeta });
+
+        return { totalFiles: allMeta.length, files: allMeta };
+    } catch (e: any) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        onError?.(error);
+        throw error;
     }
-
-    // Send finalize with the full directory manifest
-    const finalizeUrl = uploadUrl
-        ? `${uploadUrl.replace('/upload-chunk', '/finalize')}`
-        : '/api/finalize';
-
-    await fetch(finalizeUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            type: 'directory',
-            totalFiles: manifest.length,
-            manifest,
-        })
-    });
-
-    onDirectoryComplete({ totalFiles: manifest.length, manifest });
-    return { totalFiles: manifest.length, manifest };
 }
-
-// ════════════════════════════════════════════════
-// Usage Examples
-// ════════════════════════════════════════════════
-//
-// // 1. Initialize warm pool once
-// initWorkerPool();
-//
-// // 2a. Single file upload
-// const fileInput = document.getElementById('fileInput');
-// fileInput.addEventListener('change', async (e) => {
-//     await uploadFile(e.target.files[0], {
-//         onProgress: (info) => console.log(`${info.percent}%`),
-//         onFileComplete: () => console.log('Done!'),
-//     });
-// });
-//
-// // 2b. Directory upload
-// // <input type="file" webkitdirectory id="dirInput">
-// const dirInput = document.getElementById('dirInput');
-// dirInput.addEventListener('change', async (e) => {
-//     await uploadDirectory(e.target.files, {
-//         onProgress: (info) => console.log(`${info.file}: ${info.percent}%`),
-//         onFileComplete: (info) => console.log(`${info.file} complete`),
-//         onDirectoryComplete: (info) => console.log(`All ${info.totalFiles} files uploaded!`),
-//     });
-// });
-//
-// // 3. Cleanup
-// destroyWorkerPool();
