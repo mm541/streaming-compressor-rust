@@ -22,6 +22,8 @@ The project is structured as a Cargo workspace with a strict separation of conce
 - **`core/`** — A pure algorithmic library with **zero filesystem dependencies**. It accepts data structures (not file paths) and exposes compression, decompression, manifest building, and content detection. It can be consumed by any I/O frontend.
 - **`cli/`** — The native CLI binary. Handles all OS-specific operations: directory walking (`jwalk`), manifest persistence (JSON), and file I/O. It feeds data into the `core` engine.
 
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for a deep dive with detailed diagrams covering the compression pipeline, fragment layout, and extensibility model.
+
 ## Performance
 
 Benchmarked on a real-world 7.69 GB mixed-content directory (35,633 files) with Zstandard level 3 on 20 CPU cores:
