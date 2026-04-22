@@ -1,76 +1,105 @@
-# Compressor CLI Reference
+# CLI Reference
 
-The Rust Streaming Compression Engine comes with a compiled CLI interface that automatically harnesses all your CPU cores for massive multi-threaded streaming archiving.
+## Installation
 
-## Installation / Building
-To build an optimized native release binary:
 ```bash
 cargo build --release
-# The binary will be available at ./target/release/cli
+# Binary: ./target/release/cli
 ```
 
 ---
 
-## 1. Compress an Archive
+## Commands
 
-Compresses a single file or a massive nested directory perfectly into our custom mapped `.zst` fragment layout.
+### `compress` — Compress a directory or file
 
 ```bash
 cli compress <INPUT> <OUTPUT_DIR> [OPTIONS]
 ```
 
-### Arguments
-*   `<INPUT>`: The physical file or giant nested directory you want to compress (e.g. `/home/user/personal`).
-*   `<OUTPUT_DIR>`: The target directory where the engine will place the `manifest.json` and its stream of `.zst` fragments.
+**Arguments:**
+- `<INPUT>` — The file or directory to compress
+- `<OUTPUT_DIR>` — Target directory for the `manifest.json` and `.zst` fragment files
 
-### Options
-*   `-l, --level <LEVEL>`: The Zstandard compression density. Values range from `1` (blistering fast) to `22` (maximum space savings). Default is `3`.
-*   `-j, --threads <THREADS>`: Manually restrict how many CPU worker threads to use. By default, it auto-detects your system CPU structure and uses all of them.
-*   `-f, --fragment-size <FRAGMENT_SIZE>`: Control the exact byte size of the individual compressed fragments using human-readable strings (e.g., `500MB`, `1.5GB`). By default, the engine mathematically auto-computes optimal slicing windows to feed your CPU cores precisely without starving threads!
-*   `--no-skip`: Disable content-aware compression skipping. By default, the engine detects pre-compressed files (JPEG, MP4, ZIP, etc.) via magic bytes and file extensions and stores them raw to avoid wasting CPU cycles on incompressible data. Use this flag to force Zstd compression on **all** data regardless of content type.
+**Options:**
 
-### Example
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-l, --level <LEVEL>` | Zstandard compression level (1 = fastest, 22 = best ratio) | `3` |
+| `-j, --threads <N>` | Number of worker threads | Auto-detect (all cores) |
+| `-f, --fragment-size <SIZE>` | Fragment size in human-readable format (e.g. `500MB`, `1.5GB`) | Auto-computed based on dataset and core count |
+| `--no-skip` | Disable content-aware skipping. Forces Zstd on all data, including pre-compressed formats | Off (smart skipping enabled) |
+
+**Examples:**
 ```bash
-# Standard compression with smart detection (default)
-cli compress /home/user/personal ./my_archive -l 5 -j 8 -f 500MB
+# Standard compression with smart detection
+cli compress ./my_data ./archive -l 5 -j 8 -f 500MB
 
 # Force compress everything, including pre-compressed media
-cli compress /home/user/personal ./my_archive -f 500MB --no-skip
+cli compress ./my_data ./archive --no-skip
+
+# Maximum compression ratio (slower)
+cli compress ./my_data ./archive -l 19
 ```
+
+**Content-aware skipping:** By default, the engine detects pre-compressed files (JPEG, PNG, MP4, ZIP, Zstd, etc.) via magic bytes and file extensions. These files are stored raw without re-compression, avoiding wasted CPU cycles and archive inflation.
+
+**Resumable:** If the output directory already contains fragments from a previous run, the engine detects them and skips re-compression. This makes it safe to interrupt and resume large compression jobs.
 
 ---
 
-## 2. Decompress an Archive
-
-Extracts a generated stream format completely back out onto your physical disk with perfectly preserved relative folder tree structures, permissions, and sub-paths.
+### `decompress` — Extract a streaming archive
 
 ```bash
 cli decompress <ARCHIVE_DIR> <OUTPUT_DIR> [OPTIONS]
 ```
 
-### Arguments
-*   `<ARCHIVE_DIR>`: Your generated compressed archive directory (this folder must contain your `manifest.json` and `.zst` fragments).
-*   `<OUTPUT_DIR>`: The target extraction directory where your files will magically reappear exactly how they were.
+**Arguments:**
+- `<ARCHIVE_DIR>` — The compressed archive directory (must contain `manifest.json` and `.zst` fragment files)
+- `<OUTPUT_DIR>` — Target directory where files will be extracted with their original directory structure and permissions preserved
 
-### Options
-*   `-j, --threads <THREADS>`: Manually restrict the extraction CPU workers. Defaults to matching your physical core count.
+**Options:**
 
-### Example
+| Flag | Description | Default |
+|------|-------------|---------|
+| `-j, --threads <N>` | Number of worker threads | Auto-detect (all cores) |
+
+**Example:**
 ```bash
-cli decompress ./my_archive ./extracted_files
+cli decompress ./archive ./extracted
 ```
 
 ---
 
-## 3. Benchmarking Framework
+## Benchmarking
 
-If you wish to test your raw physical maximum I/O limit or visualize the exact scaling properties of your CPU, you can run the integrated bench suite:
+### Built-in synthetic benchmark
+
+Runs an in-memory 50 MB compression/decompression test to measure raw throughput and auto-concurrency scaling:
 
 ```bash
-# Standard 50 MB memory Benchmark
 cargo run --release --bin benchmark
-
-# Custom Dataset Memory/Filesystem Benchmark (Massively rigorous!)
-cargo run --release --bin benchmark /path/to/your/data
 ```
-*Note: The built-in benchmark automatically parses your system's `VmHWM` footprint to report exact peak RAM footprints, calculates compression ratios, and compares everything automatically.*
+
+Reports compression/decompression throughput (MB/s), speedup from parallelism, peak RAM, and compression ratio.
+
+### Head-to-head vs tar + zstd
+
+A shell script is included to benchmark against `tar | zstd` on any real dataset:
+
+```bash
+./benchmark.sh ./path/to/dataset        # Zstd level 3 (default)
+./benchmark.sh ./path/to/dataset 5      # Custom Zstd level
+```
+
+The script runs compress and decompress for both tools sequentially, measures wall time, peak RAM, archive size, and compression ratio, then prints a comparison table.
+
+---
+
+## Archive Format
+
+The output directory contains:
+- `manifest.json` — A JSON file describing all archived files, their byte offsets, original sizes, permissions, and fragment layout
+- `fragment_NNNNNN.zst` — Zstandard-compressed data fragments, each containing a slice of the virtual byte stream
+
+This fragment-based layout enables random-access extraction and parallel decompression.

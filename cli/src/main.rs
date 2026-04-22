@@ -4,8 +4,9 @@ use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use core::compressor::ZstdEngine;
-use core::manifest::{build_manifest, save_manifest, load_manifest};
 use core::progress::ProgressEvent;
+use cli::walker::build_manifest;
+use cli::manifest_io::{save_manifest, load_manifest};
 use cli::fs_provider::{FileSystemProvider, fragment_writer_factory, fragment_reader_factory, file_writer_factory_at, file_initializer};
 
 /// A custom parser for human-readable byte sizes natively built for clap.

@@ -226,8 +226,10 @@ where
 mod tests {
     use super::*;
     use std::fs::{self, File};
+    use std::os::unix::fs::PermissionsExt;
     use crate::compressor::ZstdEngine;
-    use crate::manifest::build_manifest;
+    use crate::manifest::{StreamEntry, Manifest};
+    use crate::manifest::builder::{compute_offsets_and_indices, build_manifest_from_entries};
     use crate::publisher::compress_archive;
     use crate::stream::StreamProvider;
     use tempfile::TempDir;
@@ -242,6 +244,36 @@ mod tests {
         }
     }
 
+    /// Test helper: build entries from files on disk, mimicking what the CLI walker does.
+    fn test_build_manifest(input_dir: &std::path::Path, fragment_size: u64) -> Manifest {
+        let root_name = input_dir.file_name().unwrap().to_string_lossy().into_owned();
+
+        let mut entries = Vec::new();
+        for entry in jwalk::WalkDir::new(input_dir).follow_links(false).skip_hidden(false) {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if !path.is_file() { continue; }
+
+            let rel = path.strip_prefix(input_dir).unwrap().to_string_lossy();
+            let identifier = format!("{}/{}", root_name, rel);
+            let meta = path.metadata().unwrap();
+            entries.push(StreamEntry {
+                identifier,
+                original_size: meta.len(),
+                permissions: meta.permissions().mode(),
+                modified_at: 0,
+                byte_offset: 0,
+                symlink_target: None,
+            });
+        }
+        entries.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+
+        let mut manifest = build_manifest_from_entries(entries, Some(1024 * 1024), true).unwrap();
+        manifest.fragment_size = fragment_size;
+        manifest.fragment_start_indices = compute_offsets_and_indices(&mut manifest.entries, fragment_size);
+        manifest
+    }
+
     #[test]
     fn test_extract_archive_end_to_end_streaming() {
         let input_dir = TempDir::new().unwrap();
@@ -254,9 +286,7 @@ mod tests {
         fs::write(input_dir.path().join("sub/f3.txt"), b"in a subdir").unwrap();
         fs::write(input_dir.path().join("empty.txt"), b"").unwrap();
 
-        let mut manifest = build_manifest(input_dir.path(), Some(1024 * 1024)).unwrap(); 
-        manifest.fragment_size = 16;
-        manifest.fragment_start_indices = crate::manifest::builder::compute_offsets_and_indices(&mut manifest.entries, 16);
+        let manifest = test_build_manifest(input_dir.path(), 16);
 
         let provider_root = input_dir.path().parent().unwrap().to_path_buf();
         let provider = TestFsProvider { root: provider_root };
@@ -334,9 +364,7 @@ mod tests {
         fs::write(input_dir.path().join("sub/f3.txt"), b"in a subdir").unwrap();
         fs::write(input_dir.path().join("empty.txt"), b"").unwrap();
 
-        let mut manifest = build_manifest(input_dir.path(), Some(1024 * 1024)).unwrap(); 
-        manifest.fragment_size = 16;
-        manifest.fragment_start_indices = crate::manifest::builder::compute_offsets_and_indices(&mut manifest.entries, 16);
+        let manifest = test_build_manifest(input_dir.path(), 16);
 
         let provider_root = input_dir.path().parent().unwrap().to_path_buf();
         let provider = TestFsProvider { root: provider_root };

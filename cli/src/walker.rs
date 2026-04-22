@@ -1,11 +1,44 @@
 //! Directory walker — scans a root path and collects file entries.
+//! 
+//! This module is the filesystem boundary. It converts OS paths into
+//! the I/O-agnostic `StreamEntry` structures that `core` operates on.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use jwalk::WalkDir;
 
-use super::{StreamEntry, entry_from_metadata};
+use core::manifest::{StreamEntry, Manifest};
+use core::manifest::builder::build_manifest_from_entries;
+
+/// Create a `StreamEntry` from a file's metadata and an identifier.
+pub fn entry_from_metadata(identifier: String, metadata: &std::fs::Metadata) -> StreamEntry {
+    let modified_at = metadata
+        .modified()
+        .unwrap_or(UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode()
+    };
+
+    #[cfg(not(unix))]
+    let permissions = 0o644;
+
+    StreamEntry {
+        identifier,
+        original_size: metadata.len(),
+        permissions,
+        modified_at,
+        byte_offset: 0,
+        symlink_target: None,
+    }
+}
 
 /// Walk a directory tree and collect metadata for all regular files.
 ///
@@ -17,7 +50,7 @@ use super::{StreamEntry, entry_from_metadata};
 /// - Unreadable files (permission denied, etc.) are **skipped** with a warning, not fatal.
 /// - Special files (sockets, FIFOs, device files) are **skipped**.
 ///
-/// `byte_offset` is set to 0 — call `compute_byte_offsets` afterwards.
+/// `byte_offset` is set to 0 — call `compute_offsets_and_indices` afterwards.
 /// `symlink_target` is set to None for regular files.
 pub fn walk_directory(root: &PathBuf) -> Result<Vec<StreamEntry>> {
     let mut entries = Vec::new();
@@ -116,13 +149,45 @@ pub fn walk_directory(root: &PathBuf) -> Result<Vec<StreamEntry>> {
     Ok(entries)
 }
 
+/// Build a complete manifest from a directory or single file path.
+///
+/// This is the filesystem-aware entry point that walks the disk,
+/// collects entries, and delegates to `core::manifest::build_manifest_from_entries`
+/// for the pure math.
+pub fn build_manifest(root: &Path, fragment_size: Option<u64>) -> Result<Manifest> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("path does not exist: {}", root.display()))?;
+
+    let is_directory = root.is_dir();
+
+    let entries = if is_directory {
+        walk_directory(&root)
+            .with_context(|| format!("failed to walk directory: {}", root.display()))?
+    } else {
+        let metadata = root
+            .metadata()
+            .with_context(|| format!("failed to read metadata: {}", root.display()))?;
+
+        let file_name = root
+            .file_name()
+            .with_context(|| format!("path has no filename: {}", root.display()))?
+            .to_string_lossy()
+            .into_owned();
+
+        vec![entry_from_metadata(file_name, &metadata)]
+    };
+
+    build_manifest_from_entries(entries, fragment_size, is_directory)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    use super::walk_directory;
-    use crate::manifest::{build_manifest, compute_offsets_and_indices};
+    use super::{walk_directory, build_manifest};
+    use core::manifest::builder::compute_offsets_and_indices;
 
     /// Create a temp directory with this structure:
     /// tmp/

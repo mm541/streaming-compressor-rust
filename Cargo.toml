@@ -2,7 +2,6 @@
 members = [
     "core",
     "cli",
-    "wasm"
 ]
 resolver = "2"
 

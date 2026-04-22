@@ -1,6 +1,11 @@
+//! Manifest I/O — reads and writes manifest JSON files to disk.
+//!
+//! This is the filesystem boundary for manifest persistence.
+//! Core only deals with the `Manifest` struct in memory.
+
 use std::path::Path;
 use anyhow::{Context, Result};
-use super::types::Manifest;
+use core::manifest::Manifest;
 
 /// Serialize a manifest to a JSON file at the given path.
 pub fn save_manifest(manifest: &Manifest, path: &Path) -> Result<()> {

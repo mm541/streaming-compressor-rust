@@ -1,9 +1,9 @@
 use std::time::Instant;
 
 use core::compressor::ZstdEngine;
-use core::manifest::build_manifest;
 use core::publisher::compress_archive;
 
+use cli::walker::build_manifest;
 use cli::fs_provider::{FileSystemProvider, fragment_writer_factory, fragment_reader_factory, file_writer_factory_at, file_initializer};
 
 fn generate_test_data(dir: &std::path::Path, total_mb: usize) {
@@ -61,7 +61,7 @@ fn bench_compress(input_dir: &std::path::Path, archive_dir: &std::path::Path, co
 
     let start = Instant::now();
 
-    let provider = FileSystemProvider::new(input_dir);
+    let provider = FileSystemProvider::new(input_dir.parent().unwrap_or(input_dir));
     let wf = fragment_writer_factory(archive_dir.to_path_buf());
     let engine = ZstdEngine::new(3);
 

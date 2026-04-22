@@ -17,8 +17,6 @@ pub trait CompressionEngine: Send + Sync {
 }
 
 // ── Zstd engine (native only) ──────────────────────────────────────────────
-
-#[cfg(not(target_arch = "wasm32"))]
 mod zstd_engine {
     use super::*;
     use zstd::stream::{Encoder, Decoder};
@@ -101,42 +99,31 @@ mod zstd_engine {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 pub use zstd_engine::ZstdEngine;
 
 // ── Legacy convenience functions (kept for backward compat) ─────────────────
 
 /// Compress a stream using Zstd (convenience wrapper).
-#[cfg(not(target_arch = "wasm32"))]
 pub fn compress_stream<R: Read, W: Write>(mut reader: R, mut writer: W, level: i32) -> Result<()> {
     let engine = ZstdEngine::new(level);
     engine.compress(&mut reader, &mut writer)
 }
 
 /// Decompress a stream using Zstd (convenience wrapper).
-#[cfg(not(target_arch = "wasm32"))]
 pub fn decompress_stream<R: Read, W: Write>(mut reader: R, mut writer: W) -> Result<()> {
     let engine = ZstdEngine::new(3);
     engine.decompress(&mut reader, &mut writer)
 }
 
 /// Compress a byte slice (routes to zstd on native, lz4 on WASM).
-#[cfg(not(target_arch = "wasm32"))]
 pub fn compress_chunk(data: &[u8], level: i32) -> Result<Vec<u8>> {
     let mut compressed = Vec::new();
     compress_stream(data, &mut compressed, level)?;
     Ok(compressed)
 }
 
-/// Compress a byte slice using lz4 for WASM targets.
-#[cfg(target_arch = "wasm32")]
-pub fn compress_chunk(data: &[u8], _level: i32) -> Result<Vec<u8>> {
-    Ok(lz4_flex::compress_prepend_size(data))
-}
-
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-#[cfg(not(target_arch = "wasm32"))]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,22 +164,5 @@ mod tests {
         engine.decompress(&mut &compressed[..], &mut decompressed).unwrap();
         
         assert_eq!(decompressed, original);
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-#[cfg(test)]
-mod wasm_tests {
-    use super::*;
-
-    #[test]
-    fn test_compress_chunk_wasm() {
-        let original_data = b"hello world from wasm";
-        let compressed = compress_chunk(original_data, 3).unwrap();
-        assert!(compressed.len() > 0);
-        assert_ne!(compressed.as_slice(), original_data);
-        
-        let decompressed = lz4_flex::decompress_size_prepended(&compressed).unwrap();
-        assert_eq!(decompressed.as_slice(), original_data);
     }
 }

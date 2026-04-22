@@ -68,7 +68,7 @@ Optional `--encrypt` flag that wraps each fragment in AES-256-GCM after compress
 ## 8. Streaming to stdout
 Support piping the archive to stdout for use in SSH/curl pipelines:
 ```bash
-cli compress /home/user/data - | ssh remote "cat > backup.sca"
+cli compress ./data - | ssh remote "cat > backup.sca"
 ```
 
 **Scope:** Detect `-` as output target. Serialize manifest + fragments into a single sequential stream format rather than separate files.

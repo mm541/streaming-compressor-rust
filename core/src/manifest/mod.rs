@@ -1,16 +1,11 @@
-//! Manifest module — responsible for building the archive blueprint
-//! before any compression happens.
+//! Manifest module — defines the archive blueprint data structures
+//! and provides pure math for computing byte offsets and fragment indices.
+//!
+//! This module is fully I/O-agnostic. Filesystem concerns (walking directories,
+//! reading/writing JSON files) belong in the CLI crate.
 
 pub mod types;
 pub mod builder;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub mod io;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod walker;
-
 pub use types::*;
 pub use builder::*;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub use io::*;

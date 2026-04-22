@@ -1,47 +1,88 @@
-# Streaming Compressor 🚀
+# Streaming Compressor
 
-A high-performance, resilient streaming compressor built for massive I/O parallelization and fast browser uploading. Built in Rust (compiled to WebAssembly + Native), it achieves incredible speed by fragmenting files and processing them concurrently.
+A high-performance streaming compression engine written in Rust. It achieves **17x faster compression** than `tar + zstd` by parallelizing the entire pipeline — filesystem traversal, chunking, and Zstandard compression — across all available CPU cores using Rayon.
 
-## Architecture & Integration
+## Architecture
 
-This repository is structured as a multi-crate workspace:
-- **`core/`**: The backbone of the compressor. Contains the `manifest` generation logic and parallel zstd block compression engines.
-- **`cli/`**: The native CLI tool for lightning-fast compression and extraction on your local machine.
-- **`wasm/`**: The browser-native library. It supports multi-threaded worker pools, smart auto-detection (skipping already compressed formats like video), and parallel HTTP chunk uploading directly to a backend.
+```
+┌─────────────────────────────────┐     ┌──────────────────────────────┐
+│           cli/                  │     │           core/              │
+│                                 │     │                              │
+│  walker.rs    (jwalk traversal) │────▶│  manifest/  (pure math)      │
+│  manifest_io  (JSON read/write) │     │  compressor (Zstd engine)    │
+│  fs_provider  (file I/O)        │     │  publisher  (parallel comp)  │
+│  main.rs      (clap CLI)        │     │  reassembler(parallel dec)   │
+│                                 │     │  detection  (content-aware)  │
+└─────────────────────────────────┘     └──────────────────────────────┘
+         OS Boundary                         I/O-Agnostic Core
+```
 
-### Developer Guides
-- 🌟 **[WASM & Frontend Integration Guide](./WASM_SUMMARY.md)**: Master the `worker.js` and `example_streaming_upload.js` logic for zero-freeze browser uploading.
-- ⚙️ **[Backend Integration Guide](./BACKEND_INTEGRATION.md)**: Learn how to set up the Spring Boot Gateway, RabbitMQ broker, and Python assembler to receive and stitch the chunks together flawlessly.
+The project is structured as a Cargo workspace with a strict separation of concerns:
 
----
+- **`core/`** — A pure algorithmic library with **zero filesystem dependencies**. It accepts data structures (not file paths) and exposes compression, decompression, manifest building, and content detection. It can be consumed by any I/O frontend.
+- **`cli/`** — The native CLI binary. Handles all OS-specific operations: directory walking (`jwalk`), manifest persistence (JSON), and file I/O. It feeds data into the `core` engine.
 
-## 🚀 Native CLI Benchmarks
+## Performance
 
-We meticulously benchmarked the CLI against a massive, highly-fragmented real-world directory (`~47 GB`) directly on an NVMe SSD to compare our 128KB passthrough arrays and thread-sorting architecture against the absolute fastest standard `tar + multi-threaded zstd` baseline.
+Benchmarked on a real-world 7.69 GB mixed-content directory (35,633 files) with Zstandard level 3 on 20 CPU cores:
 
-**Dataset:** 47.0 GB Physical Directory
-**Compression Algorithm:** Zstandard Level 3
+| Metric | tar + zstd | streaming-compressor |
+|--------|-----------|---------------------|
+| **Compress Time** | 2 min 32s | **8.92s** (17x faster) |
+| **Decompress Time** | 10.61s | **8.38s** (1.3x faster) |
+| **Archive Size** | 3,876 MB | 3,852 MB |
+| **Compression Ratio** | 2.03x | 2.04x |
+| **Compress RAM** | 101 MB | 103 MB |
 
-| Tool | Wall Time | CPU Usage | Peak RAM | Speedup vs Tar |
-| :--- | :--- | :--- | :--- | :--- |
-| `tar \| zstd -T0 -3` | 221.04s | 110% | ~344 MB | Baseline |
-| **Our Streaming Engine** | **45.80s** | **1146%** | **~246 MB** | **🔥 4.82x Faster** |
+The speedup comes from eliminating `tar`'s single-threaded pipe serialization. Our engine parallelizes filesystem traversal, fragmentation, and compression simultaneously, pushing the bottleneck to the SSD's physical read bandwidth.
 
-### Why is our engine structurally faster?
-Traditional archivers like `tar` walk physical directories sequentially, creating a massive I/O bottleneck before the byte-data even reaches the multi-threaded compressor. Our custom Rust engine does not wait for I/O sweeps. It utilizes asymmetric thread queues and huge zero-allocation `128KB` bypass pools to push dynamically mapped file blocks natively to your NVMe drive over 20 independent CPU threads simultaneously. 
+See [BENCHMARK_RESULTS.md](./BENCHMARK_RESULTS.md) for the full methodology and environment details.
 
-We functionally decouple the disk from the algorithm, fundamentally allowing your CPU cores to completely saturate write-bandwidths perfectly securely resulting in blazing **4.8x absolute speedups** using **28% less memory** natively.
-
----
-
-## 🛠️ CLI Usage & Quickstart
-
-For full instructions on configuring manual core-limits, dynamic fragment-sizing, or testing the built-in raw machine telemetry suite, check out our **[CLI Usage Manual](./CLI_USAGE.md)**!
+## Quick Start
 
 ```bash
-# Squeeze a directory into a highly parallel streaming structure:
-cargo run --release --bin cli compress /path/to/source ./archive_output -j 20
+# Build
+cargo build --release
 
-# Safely inflate the dynamic fragment stream back into original source files:
-cargo run --release --bin cli decompress ./archive_output ./restored_files
+# Compress a directory
+./target/release/cli compress ./my_data ./archive -l 3
+
+# Decompress
+./target/release/cli decompress ./archive ./restored
 ```
+
+See [CLI_USAGE.md](./CLI_USAGE.md) for the full reference.
+
+## Key Features
+
+- **Parallel compression** — Rayon-based work-stealing across all CPU cores
+- **Content-aware skipping** — Detects pre-compressed formats (JPEG, MP4, ZIP, etc.) via magic bytes and file extensions; stores them raw to avoid wasting CPU cycles
+- **Adaptive fragment sizing** — Automatically computes optimal fragment sizes based on dataset size and core count to prevent thread starvation
+- **Resumable compression** — Re-running compress on an existing archive skips already-completed fragments
+- **Random-access extraction** — Fragment-based layout enables extracting individual files without decompressing the entire archive
+- **I/O-agnostic core** — The `core` library has zero filesystem imports, making it embeddable in any context
+
+## How It Works
+
+1. **Walk** — The CLI traverses the input directory using `jwalk` (parallel directory walker) and collects file metadata
+2. **Manifest** — The core engine builds a byte-offset manifest that maps every file into a flat virtual byte stream, then slices it into equal-sized fragments
+3. **Compress** — Each fragment is compressed independently via Zstd using Rayon's thread pool. Pre-compressed content is detected and stored raw
+4. **Reassemble** — On decompression, fragments are read and decompressed in parallel. Each file is reconstructed by seeking to its byte offset and writing its data directly
+
+## Roadmap
+
+See [FUTURE_ENHANCEMENTS.md](./FUTURE_ENHANCEMENTS.md) for planned features including archive integrity verification, encryption, dry-run mode, and stdout streaming.
+
+## Run Benchmarks
+
+```bash
+# Built-in synthetic benchmark (50 MB in-memory)
+cargo run --release --bin benchmark
+
+# Head-to-head vs tar+zstd on real data
+./benchmark.sh ./path/to/dataset
+```
+
+## License
+
+MIT

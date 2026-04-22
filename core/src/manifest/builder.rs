@@ -1,16 +1,6 @@
-use super::types::StreamEntry;
-#[cfg(not(target_arch = "wasm32"))]
-use super::types::{Manifest, CompressionAlgo};
-
-#[cfg(not(target_arch = "wasm32"))]
-use super::walker;
-
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::Path;
-#[cfg(not(target_arch = "wasm32"))]
+use super::types::{StreamEntry, Manifest, CompressionAlgo};
 use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(not(target_arch = "wasm32"))]
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// Minimum allowed fragment size: 1 MB
 pub const MIN_FRAGMENT_SIZE: u64 = 1024 * 1024;
@@ -55,61 +45,16 @@ pub fn compute_offsets_and_indices(entries: &mut [StreamEntry], fragment_size: u
     fragment_start_indices
 }
 
-/// Create a `StreamEntry` from a file's metadata and an identifier.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn entry_from_metadata(identifier: String, metadata: &std::fs::Metadata) -> StreamEntry {
-    let modified_at = metadata
-        .modified()
-        .unwrap_or(UNIX_EPOCH)
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    #[cfg(unix)]
-    let permissions = {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode()
-    };
-
-    #[cfg(not(unix))]
-    let permissions = 0o644;
-
-    StreamEntry {
-        identifier,
-        original_size: metadata.len(),
-        permissions,
-        modified_at,
-        byte_offset: 0,
-        symlink_target: None,
-    }
-}
-
-/// Build a complete manifest from a directory or single file path.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn build_manifest(root: &Path, fragment_size: Option<u64>) -> Result<Manifest> {
-    let root = root
-        .canonicalize()
-        .with_context(|| format!("path does not exist: {}", root.display()))?;
-
-    let is_directory = root.is_dir();
-
-    let mut entries = if is_directory {
-        walker::walk_directory(&root)
-            .with_context(|| format!("failed to walk directory: {}", root.display()))?
-    } else {
-        let metadata = root
-            .metadata()
-            .with_context(|| format!("failed to read metadata: {}", root.display()))?;
-
-        let file_name = root
-            .file_name()
-            .with_context(|| format!("path has no filename: {}", root.display()))?
-            .to_string_lossy()
-            .into_owned();
-
-        vec![entry_from_metadata(file_name, &metadata)]
-    };
-
+/// Build a complete manifest from pre-collected entries.
+///
+/// This is the I/O-agnostic entry point. The caller (e.g., CLI) is responsible
+/// for walking the filesystem and building the `Vec<StreamEntry>`. Core only
+/// does the math: computing offsets, fragment sizes, and indices.
+pub fn build_manifest_from_entries(
+    mut entries: Vec<StreamEntry>,
+    fragment_size: Option<u64>,
+    is_directory: bool,
+) -> Result<Manifest> {
     let total_original_size = entries.iter().map(|e| e.original_size).sum();
 
     let resolved_fragment_size = fragment_size.unwrap_or_else(|| {
@@ -137,7 +82,7 @@ pub fn build_manifest(root: &Path, fragment_size: Option<u64>) -> Result<Manifes
         created_at,
         total_original_size,
         fragment_size: resolved_fragment_size,
-        algo: CompressionAlgo::Zstd, // Defaulting to native target choice
+        algo: CompressionAlgo::Zstd,
         is_directory,
         entries,
         fragments: Vec::new(),
